@@ -13,6 +13,7 @@ type UserId = u32
 
 struct User { id: UserId, balance: u32 }
 struct MyInt(u32)
+struct CopyStore { users: List<u32> }: Dup + Zap
 
 enum Option<T> {
   none,
@@ -38,6 +39,32 @@ impl Eq for User {
 
 `struct MyInt(u32)` is valid. `struct MyInt u32` is not. Tuple and record
 syntax must use parentheses or braces so the grouping is explicit.
+
+`Dup` and `Zap` are written like trait bounds on type declarations:
+
+```linear
+struct CopyStore { users: List<u32> }: Dup + Zap
+enum DropEvent { item(u32) }: Zap
+```
+
+They are trait-like at the surface, but currently compiler-recognized
+capabilities, not ordinary user traits. They change the linearity rules:
+`Dup` permits explicit duplication and `Zap` permits explicit dropping.
+
+Composite declarations may only declare capabilities they already have
+structurally. This is rejected because `MutList<u32>` is linear:
+
+```linear
+struct Bad { work: MutList<u32> }: Dup
+```
+
+Capability clauses currently lower only on nominal `struct` and `enum`
+declarations. A `type` alias with a capability clause is parsed but rejected by
+lowering, because that would no longer be a plain alias:
+
+```linear
+type Users = HashMap<UserId, User>: Dup // rejected for now
+```
 
 ## Grouping
 
@@ -161,6 +188,12 @@ The first semantic lowering pass handles non-generic type items:
 
 Generic declarations are parsed but rejected by this pass until monomorphization
 or another generic strategy exists.
+
+Declared `Dup`/`Zap` capabilities on nominal structs and enums lower into core
+`DeclaredCapabilities`, then the type store verifies they do not exceed the
+type's structural capabilities. Unknown capability names are rejected.
+Capability clauses on `type` aliases are rejected until aliases can either
+remain pure aliases or become explicit newtypes.
 
 The signature lowering pass builds on this and registers:
 

@@ -135,6 +135,38 @@ fn parses_braced_struct_and_enum_groups() {
 }
 
 #[test]
+fn parses_type_capability_clauses() {
+    let module = parse_module(
+        r#"
+        struct Store { users: List<u32> }: Dup + Zap
+
+        enum Flow {
+          changed,
+          sunk,
+        }: Zap
+
+        type Users = HashMap<u32, User>: Dup
+        "#,
+    )
+    .unwrap();
+
+    let Item::Struct(store) = &module.items[0] else {
+        panic!("expected struct item");
+    };
+    assert_eq!(store.capabilities, vec!["Dup", "Zap"]);
+
+    let Item::Enum(flow) = &module.items[1] else {
+        panic!("expected enum item");
+    };
+    assert_eq!(flow.capabilities, vec!["Zap"]);
+
+    let Item::Type(users) = &module.items[2] else {
+        panic!("expected type item");
+    };
+    assert_eq!(users.capabilities, vec!["Dup"]);
+}
+
+#[test]
 fn parses_optional_arg_labels_and_method_calls() {
     let module = parse_module(
         r#"

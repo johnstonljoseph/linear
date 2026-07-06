@@ -19,6 +19,7 @@ pub struct TypeDef {
     pub name: String,
     pub generics: Vec<String>,
     pub ty: TypeExpr,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

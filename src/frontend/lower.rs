@@ -75,6 +75,10 @@ pub enum LowerError {
         expected: usize,
         actual: usize,
     },
+    UnknownCapability(String),
+    UnsupportedAliasCapabilities {
+        name: String,
+    },
     ExpectedStructBody {
         name: String,
     },
@@ -191,11 +195,13 @@ impl TypeLowerer {
             match item {
                 Item::Type(type_def) => {
                     reject_generics(&type_def.name, &type_def.generics)?;
+                    reject_alias_capabilities(&type_def.name, &type_def.capabilities)?;
                     let ty = self.lower_type_expr(&type_def.ty)?;
                     self.types.add_alias(type_def.name.clone(), ty)?;
                 }
                 Item::Struct(type_def) => {
                     reject_generics(&type_def.name, &type_def.generics)?;
+                    let declared = declared_capabilities(&type_def.capabilities)?;
                     let fields = match &type_def.ty {
                         TypeExpr::Product(fields) => self.lower_components(fields)?,
                         TypeExpr::Unit => Vec::new(),
@@ -205,14 +211,12 @@ impl TypeLowerer {
                             });
                         }
                     };
-                    self.types.add_product(
-                        Some(type_def.name.clone()),
-                        fields,
-                        DeclaredCapabilities::linear(),
-                    )?;
+                    self.types
+                        .add_product(Some(type_def.name.clone()), fields, declared)?;
                 }
                 Item::Enum(type_def) => {
                     reject_generics(&type_def.name, &type_def.generics)?;
+                    let declared = declared_capabilities(&type_def.capabilities)?;
                     let variants = match &type_def.ty {
                         TypeExpr::Sum(variants) => self.lower_components(variants)?,
                         _ => {
@@ -221,11 +225,8 @@ impl TypeLowerer {
                             });
                         }
                     };
-                    self.types.add_sum(
-                        Some(type_def.name.clone()),
-                        variants,
-                        DeclaredCapabilities::linear(),
-                    )?;
+                    self.types
+                        .add_sum(Some(type_def.name.clone()), variants, declared)?;
                 }
                 Item::Global(_) | Item::Function(_) | Item::Impl(_) | Item::Trait(_) => {}
             }
@@ -1541,6 +1542,28 @@ fn reject_generics(name: &str, generics: &[String]) -> Result<(), LowerError> {
             name: name.to_owned(),
         })
     }
+}
+
+fn reject_alias_capabilities(name: &str, capabilities: &[String]) -> Result<(), LowerError> {
+    if capabilities.is_empty() {
+        Ok(())
+    } else {
+        Err(LowerError::UnsupportedAliasCapabilities {
+            name: name.to_owned(),
+        })
+    }
+}
+
+fn declared_capabilities(capabilities: &[String]) -> Result<DeclaredCapabilities, LowerError> {
+    let mut declared = DeclaredCapabilities::linear();
+    for capability in capabilities {
+        match capability.as_str() {
+            "Dup" => declared.dup = true,
+            "Zap" => declared.zap = true,
+            _ => return Err(LowerError::UnknownCapability(capability.clone())),
+        }
+    }
+    Ok(declared)
 }
 
 fn expect_arity<'a, const N: usize>(

@@ -45,13 +45,22 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
     let ty = type_parser();
     let expr = expr_parser();
     let generics = generic_params_parser();
+    let capability_clause = capability_clause_parser();
 
     let type_def = keyword("type")
         .ignore_then(ident.clone())
         .then(generics.clone())
         .then_ignore(sym('='))
         .then(ty.clone())
-        .map(|((name, generics), ty)| Item::Type(TypeDef { name, generics, ty }));
+        .then(capability_clause.clone())
+        .map(|(((name, generics), ty), capabilities)| {
+            Item::Type(TypeDef {
+                name,
+                generics,
+                ty,
+                capabilities,
+            })
+        });
 
     let named_type_field =
         ident
@@ -83,7 +92,15 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         .ignore_then(ident.clone())
         .then(generics.clone())
         .then(choice((braced_struct_body, tuple_struct_body)))
-        .map(|((name, generics), ty)| Item::Struct(TypeDef { name, generics, ty }));
+        .then(capability_clause.clone())
+        .map(|(((name, generics), ty), capabilities)| {
+            Item::Struct(TypeDef {
+                name,
+                generics,
+                ty,
+                capabilities,
+            })
+        });
 
     let record_variant_payload = named_type_field
         .clone()
@@ -121,7 +138,15 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         .ignore_then(ident.clone())
         .then(generics.clone())
         .then(braced_enum_body)
-        .map(|((name, generics), ty)| Item::Enum(TypeDef { name, generics, ty }));
+        .then(capability_clause.clone())
+        .map(|(((name, generics), ty), capabilities)| {
+            Item::Enum(TypeDef {
+                name,
+                generics,
+                ty,
+                capabilities,
+            })
+        });
 
     let global_def = keyword("global")
         .ignore_then(ident.clone())
@@ -798,6 +823,20 @@ fn generic_params_parser<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .delimited_by(sym('<'), sym('>'))
+        .or_not()
+        .map(Option::unwrap_or_default)
+        .boxed()
+}
+
+fn capability_clause_parser<'src>()
+-> impl Parser<'src, &'src str, Vec<String>, extra::Err<Rich<'src, char>>> + Clone {
+    sym(':')
+        .ignore_then(
+            ident_parser()
+                .separated_by(op("+"))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
         .or_not()
         .map(Option::unwrap_or_default)
         .boxed()

@@ -1,7 +1,7 @@
 use linear::frontend::ValueFlow;
 use linear::{
-    CollectionMutability, Component, ComponentName, CoreError, Evaluator, TypeError, TypeKind,
-    Value, frontend,
+    Capabilities, CollectionMutability, Component, ComponentName, CoreError, Evaluator, TypeError,
+    TypeKind, Value, frontend,
 };
 
 fn lower(src: &str) -> linear::TypeStore {
@@ -163,6 +163,54 @@ fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::Type(TypeError::DuplicateName("u32".into()))
+    );
+
+    let module = frontend::parse_module("struct Bad { value: u32 }: Eq").unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::UnknownCapability("Eq".into())
+    );
+
+    let module = frontend::parse_module("type Alias = u32: Dup").unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::UnsupportedAliasCapabilities {
+            name: "Alias".into()
+        }
+    );
+}
+
+#[test]
+fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
+    let module = frontend::parse_module("struct Bad { work: MutList<u32> }: Dup").unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::Type(TypeError::DeclaredCapabilityExceedsStructural {
+            declared: Capabilities {
+                dup: true,
+                zap: false,
+            },
+            structural: Capabilities::linear(),
+        })
+    );
+
+    let module = frontend::parse_module(
+        r#"
+        enum Bad {
+          item(MutList<u32>),
+        }: Zap
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::Type(TypeError::DeclaredCapabilityExceedsStructural {
+            declared: Capabilities {
+                dup: false,
+                zap: true,
+            },
+            structural: Capabilities::linear(),
+        })
     );
 }
 

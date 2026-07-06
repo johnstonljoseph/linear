@@ -69,7 +69,7 @@ enum ExprNode {
   binary { lhs: ExprNodeId, op: BinaryOp, rhs: ExprNodeId },
 }
 
-struct TypeDef { name: Name, generics: Vector<Name>, ty: TypeNodeId }
+struct TypeDef { name: Name, generics: Vector<Name>, ty: TypeNodeId, capabilities: Vector<Name> }
 struct GlobalDef { name: Name, ty: TypeNodeId, value: Option<ExprNodeId> }
 struct FunctionSig { name: Name, generics: Vector<Name>, params: Vector<Param>, output: TypeNodeId }
 struct FunctionDef { name: Name, generics: Vector<Name>, params: Vector<Param>, output: TypeNodeId, body: Block }
