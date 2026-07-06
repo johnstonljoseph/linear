@@ -349,7 +349,36 @@ fn lowers_and_runs_simple_arithmetic_bodies() {
 }
 
 #[test]
-fn returned_unchanged_params_are_duplicated_for_reads() {
+fn infix_ops_thread_returned_unchanged_params_without_dup() {
+    let module = frontend::parse_module(
+        r#"
+        fn below_ten(x: u32) -> Bool {
+          x < 10
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("below_ten").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(7)])
+        .unwrap();
+
+    assert_eq!(
+        result,
+        vec![
+            Value::Finite(7),
+            Value::Sum {
+                variant: 1,
+                payload: Box::new(Value::Unit),
+            },
+        ]
+    );
+}
+
+#[test]
+fn body_lowering_does_not_auto_dup_visible_returns() {
     let module = frontend::parse_module(
         r#"
         fn copy_return(x: u32) -> u32 {
@@ -359,13 +388,10 @@ fn returned_unchanged_params_are_duplicated_for_reads() {
     )
     .unwrap();
 
-    let lowered = frontend::lower_module_bodies(&module).unwrap();
-    let function = lowered.program.function_id("copy_return").unwrap();
-    let result = Evaluator::new(&lowered.types, &lowered.program)
-        .run_function(function, vec![Value::Finite(7)])
-        .unwrap();
-
-    assert_eq!(result, vec![Value::Finite(7), Value::Finite(7)]);
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::Core(CoreError::ConsumedValue(linear::ValueId(0)))
+    );
 }
 
 #[test]

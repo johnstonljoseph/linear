@@ -197,18 +197,22 @@ The first body-lowering pass supports a deliberately small executable subset:
 - finite `+`, `-`, `*`, `==`, `<`, and `>` over integer-like finite types.
 
 Body lowering automatically returns every non-`take` parameter first. The final
-body expression supplies only the visible surface result. Returned-unchanged
-parameters are auto-duplicated when read, so this:
+body expression supplies only the visible surface result. Finite infix
+operators lower as ordinary observer-style primitive calls: they consume their
+operands and return those operands unchanged, followed by the visible result.
+So this:
 
 ```linear
-fn copy_return(x: u32) -> u32 {
-  x
+fn below_ten(x: u32) -> Bool {
+  x < 10
 }
 ```
 
-returns `(x, x)` at core level. `mut` parameters are not auto-duplicated; if a
-body consumes one without rebinding it through a call result, the core checker
-rejects the function.
+returns `(x, Bool)` at core level without inserting a frontend `dup`. A function
+that literally returns the same visible value that is also implicitly returned
+still needs a real duplication operation; the body lowerer does not invent one.
+`mut` parameters are not auto-duplicated either. If a body consumes one without
+rebinding it through a call result, the core checker rejects the function.
 
 Calls consume all arguments at core level. For any callee argument declared
 without `take`, the surface argument must be a name so the callee's hidden

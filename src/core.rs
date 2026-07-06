@@ -826,13 +826,13 @@ impl<'a> FunctionChecker<'a> {
             | BuiltinOp::FiniteMul { ty } => {
                 finite_cardinality(self.types, *ty)?;
                 self.consume_args(args, &[*ty, *ty])?;
-                Ok(vec![*ty])
+                Ok(vec![*ty, *ty, *ty])
             }
             BuiltinOp::FiniteEq { ty, bool_ty } | BuiltinOp::FiniteLt { ty, bool_ty } => {
                 finite_cardinality(self.types, *ty)?;
                 validate_bool_type(self.types, *bool_ty)?;
                 self.consume_args(args, &[*ty, *ty])?;
-                Ok(vec![*bool_ty])
+                Ok(vec![*ty, *ty, *bool_ty])
             }
             BuiltinOp::ListEmpty { list_ty } => {
                 list_element(self.types, *list_ty)?;

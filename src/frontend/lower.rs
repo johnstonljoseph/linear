@@ -479,6 +479,12 @@ struct LoweredValue {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct LoweredBinaryOperand {
+    name: Option<String>,
+    value: LoweredValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CallableSignature {
     params: Vec<LoweredParam>,
     visible_output: Option<TypeId>,
@@ -662,9 +668,6 @@ impl<'a> BodyLowerer<'a> {
 
     fn lower_name(&mut self, name: &str) -> Result<LoweredValue, LowerError> {
         if let Some(value) = self.env.get(name).copied() {
-            if self.param_flow(name) == Some(ValueFlow::ReturnedUnchanged) {
-                return self.dup_returned_unchanged_param(name, value);
-            }
             return Ok(value);
         }
         if let Some(global) = self.program.global_decl_id(name) {
@@ -678,30 +681,6 @@ impl<'a> BodyLowerer<'a> {
             return Ok(LoweredValue { id, ty });
         }
         Err(LowerError::UnknownValue(name.to_owned()))
-    }
-
-    fn dup_returned_unchanged_param(
-        &mut self,
-        name: &str,
-        value: LoweredValue,
-    ) -> Result<LoweredValue, LowerError> {
-        if !self.types.can_dup(value.ty)? {
-            return Err(LowerError::Core(CoreError::CannotDup(value.ty)));
-        }
-        let used = self.fresh_value();
-        let kept = self.fresh_value();
-        self.push_statement(vec![used, kept], CoreExpr::Dup { value: value.id })?;
-        self.env.insert(
-            name.to_owned(),
-            LoweredValue {
-                id: kept,
-                ty: value.ty,
-            },
-        );
-        Ok(LoweredValue {
-            id: used,
-            ty: value.ty,
-        })
     }
 
     fn lower_int(
@@ -965,13 +944,13 @@ impl<'a> BodyLowerer<'a> {
         op: BinaryOp,
         rhs: &Expr,
     ) -> Result<LoweredValue, LowerError> {
-        let lhs = self.lower_expr(lhs, None)?;
-        self.require_finite(lhs.ty)?;
-        let rhs = self.lower_expr(rhs, Some(lhs.ty))?;
-        if rhs.ty != lhs.ty {
+        let lhs = self.lower_binary_operand(lhs, None)?;
+        self.require_finite(lhs.value.ty)?;
+        let rhs = self.lower_binary_operand(rhs, Some(lhs.value.ty))?;
+        if rhs.value.ty != lhs.value.ty {
             return Err(LowerError::TypeMismatch {
-                expected: lhs.ty,
-                actual: rhs.ty,
+                expected: lhs.value.ty,
+                actual: rhs.value.ty,
             });
         }
 
@@ -979,46 +958,51 @@ impl<'a> BodyLowerer<'a> {
             .types
             .type_id("Bool")
             .ok_or_else(|| LowerError::UnknownType("Bool".into()))?;
-        let id = self.fresh_value();
-        let (core_op, args, ty) = match op {
+        let (core_op, args, ty, returned_operands) = match op {
             BinaryOp::Add => (
-                BuiltinOp::FiniteAdd { ty: lhs.ty },
-                vec![lhs.id, rhs.id],
-                lhs.ty,
+                BuiltinOp::FiniteAdd { ty: lhs.value.ty },
+                vec![lhs.value.id, rhs.value.id],
+                lhs.value.ty,
+                vec![lhs, rhs],
             ),
             BinaryOp::Sub => (
-                BuiltinOp::FiniteSub { ty: lhs.ty },
-                vec![lhs.id, rhs.id],
-                lhs.ty,
+                BuiltinOp::FiniteSub { ty: lhs.value.ty },
+                vec![lhs.value.id, rhs.value.id],
+                lhs.value.ty,
+                vec![lhs, rhs],
             ),
             BinaryOp::Mul => (
-                BuiltinOp::FiniteMul { ty: lhs.ty },
-                vec![lhs.id, rhs.id],
-                lhs.ty,
+                BuiltinOp::FiniteMul { ty: lhs.value.ty },
+                vec![lhs.value.id, rhs.value.id],
+                lhs.value.ty,
+                vec![lhs, rhs],
             ),
             BinaryOp::Eq => (
                 BuiltinOp::FiniteEq {
-                    ty: lhs.ty,
+                    ty: lhs.value.ty,
                     bool_ty,
                 },
-                vec![lhs.id, rhs.id],
+                vec![lhs.value.id, rhs.value.id],
                 bool_ty,
+                vec![lhs, rhs],
             ),
             BinaryOp::Lt => (
                 BuiltinOp::FiniteLt {
-                    ty: lhs.ty,
+                    ty: lhs.value.ty,
                     bool_ty,
                 },
-                vec![lhs.id, rhs.id],
+                vec![lhs.value.id, rhs.value.id],
                 bool_ty,
+                vec![lhs, rhs],
             ),
             BinaryOp::Gt => (
                 BuiltinOp::FiniteLt {
-                    ty: lhs.ty,
+                    ty: lhs.value.ty,
                     bool_ty,
                 },
-                vec![rhs.id, lhs.id],
+                vec![rhs.value.id, lhs.value.id],
                 bool_ty,
+                vec![rhs, lhs],
             ),
             BinaryOp::Div | BinaryOp::NotEq | BinaryOp::Lte | BinaryOp::Gte => {
                 return Err(LowerError::UnsupportedExpression(
@@ -1026,8 +1010,63 @@ impl<'a> BodyLowerer<'a> {
                 ));
             }
         };
-        self.push_statement(vec![id], CoreExpr::Builtin { op: core_op, args })?;
+
+        let returned_lhs = self.fresh_value();
+        let returned_rhs = self.fresh_value();
+        let id = self.fresh_value();
+        self.push_statement(
+            vec![returned_lhs, returned_rhs, id],
+            CoreExpr::Builtin { op: core_op, args },
+        )?;
+        for (operand, returned_id) in returned_operands
+            .into_iter()
+            .zip([returned_lhs, returned_rhs])
+        {
+            self.handle_returned_binary_operand(operand, returned_id)?;
+        }
         Ok(LoweredValue { id, ty })
+    }
+
+    fn lower_binary_operand(
+        &mut self,
+        expr: &Expr,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredBinaryOperand, LowerError> {
+        let name = match expr {
+            Expr::Name(name) if self.env.contains_key(name) => Some(name.clone()),
+            _ => None,
+        };
+        let value = self.lower_expr(expr, expected)?;
+        Ok(LoweredBinaryOperand { name, value })
+    }
+
+    fn handle_returned_binary_operand(
+        &mut self,
+        operand: LoweredBinaryOperand,
+        returned_id: ValueId,
+    ) -> Result<(), LowerError> {
+        match operand.name {
+            Some(name)
+                if matches!(
+                    self.param_flow(&name),
+                    Some(flow) if flow != ValueFlow::NotReturned
+                ) =>
+            {
+                self.env.insert(
+                    name,
+                    LoweredValue {
+                        id: returned_id,
+                        ty: operand.value.ty,
+                    },
+                );
+                Ok(())
+            }
+            Some(name) => {
+                self.env.remove(&name);
+                self.push_statement(vec![], CoreExpr::Zap { value: returned_id })
+            }
+            None => self.push_statement(vec![], CoreExpr::Zap { value: returned_id }),
+        }
     }
 
     fn resolve_existing_type(&self, ty: &TypeExpr) -> Result<TypeId, LowerError> {

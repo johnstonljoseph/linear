@@ -445,14 +445,16 @@ fn global_defs_can_define_static_function_values() {
                     },
                 ),
                 Statement::new(
-                    vec![ValueId(2)],
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
                     Expr::Builtin {
                         op: BuiltinOp::FiniteAdd { ty: u32_ty },
                         args: vec![ValueId(0), ValueId(1)],
                     },
                 ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
             ],
-            returns: vec![ValueId(2)],
+            returns: vec![ValueId(4)],
         })
         .unwrap();
     let global = program
@@ -550,14 +552,18 @@ fn builtin_finite_arithmetic_checks_and_runs() {
                 Param::new(ValueId(1), u32_ty),
             ],
             outputs: vec![u32_ty],
-            body: vec![Statement::new(
-                vec![ValueId(2)],
-                Expr::Builtin {
-                    op: BuiltinOp::FiniteAdd { ty: u32_ty },
-                    args: vec![ValueId(0), ValueId(1)],
-                },
-            )],
-            returns: vec![ValueId(2)],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
+                    Expr::Builtin {
+                        op: BuiltinOp::FiniteAdd { ty: u32_ty },
+                        args: vec![ValueId(0), ValueId(1)],
+                    },
+                ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
+            ],
+            returns: vec![ValueId(4)],
         })
         .unwrap();
 
@@ -584,17 +590,21 @@ fn builtin_finite_comparison_returns_bool_sum() {
                 Param::new(ValueId(1), u32_ty),
             ],
             outputs: vec![bool_ty],
-            body: vec![Statement::new(
-                vec![ValueId(2)],
-                Expr::Builtin {
-                    op: BuiltinOp::FiniteLt {
-                        ty: u32_ty,
-                        bool_ty,
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
+                    Expr::Builtin {
+                        op: BuiltinOp::FiniteLt {
+                            ty: u32_ty,
+                            bool_ty,
+                        },
+                        args: vec![ValueId(0), ValueId(1)],
                     },
-                    args: vec![ValueId(0), ValueId(1)],
-                },
-            )],
-            returns: vec![ValueId(2)],
+                ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
+            ],
+            returns: vec![ValueId(4)],
         })
         .unwrap();
 
@@ -906,7 +916,7 @@ fn recursive_functions_check_and_run() {
                     },
                 ),
                 Statement::new(
-                    vec![ValueId(2)],
+                    vec![ValueId(22), ValueId(23), ValueId(2)],
                     Expr::Builtin {
                         op: BuiltinOp::FiniteLt {
                             ty: u32_ty,
@@ -915,6 +925,8 @@ fn recursive_functions_check_and_run() {
                         args: vec![ValueId(20), ValueId(1)],
                     },
                 ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(22) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(23) }),
                 Statement::new(
                     vec![ValueId(10)],
                     Expr::Match {
@@ -933,12 +945,14 @@ fn recursive_functions_check_and_run() {
                                         },
                                     ),
                                     Statement::new(
-                                        vec![ValueId(5)],
+                                        vec![ValueId(22), ValueId(23), ValueId(5)],
                                         Expr::Builtin {
                                             op: BuiltinOp::FiniteSub { ty: u32_ty },
                                             args: vec![ValueId(21), ValueId(4)],
                                         },
                                     ),
+                                    Statement::new(vec![], Expr::Zap { value: ValueId(22) }),
+                                    Statement::new(vec![], Expr::Zap { value: ValueId(23) }),
                                     Statement::new(
                                         vec![ValueId(6)],
                                         Expr::Call {
@@ -1005,14 +1019,16 @@ fn static_function_values_check_and_run() {
                     },
                 ),
                 Statement::new(
-                    vec![ValueId(2)],
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
                     Expr::Builtin {
                         op: BuiltinOp::FiniteAdd { ty: u32_ty },
                         args: vec![ValueId(0), ValueId(1)],
                     },
                 ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
             ],
-            returns: vec![ValueId(2)],
+            returns: vec![ValueId(4)],
         })
         .unwrap();
     let apply = program

@@ -339,8 +339,14 @@ and later metadata/lowering can use it.
 
 The current built-ins are:
 
+- finite arithmetic and comparisons: `add`, `sub`, `mul`, `eq`, `lt`;
 - list: `empty`, `push`, `len`, `get`;
 - hashmap: `empty`, `insert`, `get_or`, `contains`.
+
+Finite arithmetic and comparison builtins are observer-style operations: they
+consume both operands and return both operands unchanged, followed by the
+visible result. For example, finite `add` has core result shape
+`(lhs, rhs, sum)`, and finite `lt` has result shape `(lhs, rhs, bool)`.
 
 Read-like operations still thread the collection through. For example,
 `ListGet` consumes `list, index` and returns `list, element`. Element reads
@@ -366,9 +372,9 @@ The evaluator currently supports:
 - products, sums, exhaustive matching, `dup`, and `zap`;
 - lists/vectors and hashmaps.
 
-Finite arithmetic is modular over the finite type cardinality. Boolean results
-are represented as a two-variant sum over `unit`, with variant `0` as false and
-variant `1` as true.
+Finite arithmetic is modular over the finite type cardinality. Boolean visible
+results are represented as a two-variant sum over `unit`, with variant `0` as
+false and variant `1` as true.
 
 ## Iteration And Intent
 

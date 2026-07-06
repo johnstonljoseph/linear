@@ -308,27 +308,45 @@ impl<'a> Evaluator<'a> {
             BuiltinOp::FiniteAdd { ty } => {
                 let modulus = finite_cardinality(self.types, *ty)?;
                 let [lhs, rhs] = finite_pair(args)?;
-                Ok(vec![Value::Finite((lhs + rhs) % modulus)])
+                Ok(vec![
+                    Value::Finite(lhs),
+                    Value::Finite(rhs),
+                    Value::Finite((lhs + rhs) % modulus),
+                ])
             }
             BuiltinOp::FiniteSub { ty } => {
                 let modulus = finite_cardinality(self.types, *ty)?;
                 let [lhs, rhs] = finite_pair(args)?;
-                Ok(vec![Value::Finite(
-                    (lhs + modulus - (rhs % modulus)) % modulus,
-                )])
+                Ok(vec![
+                    Value::Finite(lhs),
+                    Value::Finite(rhs),
+                    Value::Finite((lhs + modulus - (rhs % modulus)) % modulus),
+                ])
             }
             BuiltinOp::FiniteMul { ty } => {
                 let modulus = finite_cardinality(self.types, *ty)?;
                 let [lhs, rhs] = finite_pair(args)?;
-                Ok(vec![Value::Finite((lhs * rhs) % modulus)])
+                Ok(vec![
+                    Value::Finite(lhs),
+                    Value::Finite(rhs),
+                    Value::Finite((lhs * rhs) % modulus),
+                ])
             }
             BuiltinOp::FiniteEq { .. } => {
                 let [lhs, rhs] = finite_pair(args)?;
-                Ok(vec![bool_value(lhs == rhs)])
+                Ok(vec![
+                    Value::Finite(lhs),
+                    Value::Finite(rhs),
+                    bool_value(lhs == rhs),
+                ])
             }
             BuiltinOp::FiniteLt { .. } => {
                 let [lhs, rhs] = finite_pair(args)?;
-                Ok(vec![bool_value(lhs < rhs)])
+                Ok(vec![
+                    Value::Finite(lhs),
+                    Value::Finite(rhs),
+                    bool_value(lhs < rhs),
+                ])
             }
             BuiltinOp::ListEmpty { .. } => Ok(vec![Value::List(Vec::new())]),
             BuiltinOp::ListPush { .. } => {
