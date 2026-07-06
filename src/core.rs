@@ -853,9 +853,6 @@ impl<'a> FunctionChecker<'a> {
             BuiltinOp::ListGet { list_ty, index_ty } => {
                 let element = list_element(self.types, *list_ty)?;
                 finite_cardinality(self.types, *index_ty)?;
-                if !self.types.can_dup(element)? {
-                    return Err(CoreError::CannotDup(element));
-                }
                 self.consume_args(args, &[*list_ty, *index_ty])?;
                 Ok(vec![*list_ty, element])
             }
@@ -871,12 +868,6 @@ impl<'a> FunctionChecker<'a> {
             }
             BuiltinOp::HashMapGetOr { map_ty } => {
                 let (key, value) = hashmap_parts(self.types, *map_ty)?;
-                if !self.types.can_dup(value)? {
-                    return Err(CoreError::CannotDup(value));
-                }
-                if !self.types.can_zap(value)? {
-                    return Err(CoreError::CannotZap(value));
-                }
                 self.consume_args(args, &[*map_ty, key, value])?;
                 Ok(vec![*map_ty, value])
             }
@@ -1028,19 +1019,39 @@ fn check_function_value_type(
     let callee = program
         .get(function)
         .ok_or(CoreError::UnknownFunction(function))?;
-    if callee.inputs.len() != 1 || callee.outputs.len() != 1 {
-        return Err(CoreError::FunctionTypeMismatch {
-            function,
-            ty: function_ty,
-        });
-    }
-    if callee.inputs[0].ty != input || callee.outputs[0] != output {
+    let input_parts = callee
+        .inputs
+        .iter()
+        .map(|input| input.ty)
+        .collect::<Vec<_>>();
+    if !packed_signature_matches(types, input, &input_parts)?
+        || !packed_signature_matches(types, output, &callee.outputs)?
+    {
         return Err(CoreError::FunctionTypeMismatch {
             function,
             ty: function_ty,
         });
     }
     Ok(())
+}
+
+fn packed_signature_matches(
+    types: &TypeStore,
+    packed_ty: TypeId,
+    parts: &[TypeId],
+) -> Result<bool, CoreError> {
+    match parts {
+        [] => Ok(packed_ty == types.unit()),
+        [part] => Ok(packed_ty == *part),
+        parts => match type_kind(types, packed_ty)? {
+            TypeKind::Product(fields) => Ok(fields.len() == parts.len()
+                && fields
+                    .iter()
+                    .zip(parts.iter().copied())
+                    .all(|(field, part)| field.ty == part)),
+            _ => Ok(false),
+        },
+    }
 }
 
 fn check_product_residual(

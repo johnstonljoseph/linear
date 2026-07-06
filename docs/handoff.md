@@ -150,6 +150,11 @@ Current capability behavior:
 - immutable collections derive capabilities structurally from contents.
 - mutable collections are linear regardless of contents.
 
+Declared capabilities on composite types are checked against the structural
+capabilities. A product, sum, or collection cannot declare `Dup` or `Zap` unless
+its components already support that capability. Opaque primitive types are the
+escape hatch for axiomatic capabilities.
+
 There is no separate "unrestricted" flag in the type model. A type that can be
 both duplicated and zapped is effectively unrestricted at the value level.
 
@@ -208,6 +213,26 @@ However, static function ids can be passed around as values. A value of function
 type may be chosen by control flow or loaded from data, as long as its signature
 is known.
 
+Function types remain unary `A -> B`. When a referenced core function has
+multiple inputs or outputs, the first-class function convention packs them:
+
+- zero inputs or outputs are represented as `unit`;
+- one input or output is represented directly;
+- multiple inputs or outputs are represented by a product with matching field
+  order.
+
+So a core function with shape:
+
+```text
+(State, Config, Event) -> (State, Config, Decision)
+```
+
+can be used as a function value of type:
+
+```text
+(State * Config * Event) -> (State * Config * Decision)
+```
+
 Closures are intended as surface sugar over ordinary product types:
 
 ```text
@@ -250,12 +275,15 @@ when a value is read by an observer op.
 Collection builtins thread the collection handle:
 
 - `len(list) -> (list, len)`;
-- `get(list, index) -> (list, element)`;
+- `get(list, index) -> (residual_list, element)`;
 - `insert(map, key, value) -> map`.
 
-Some collection read operations currently require element/value capabilities.
-For example, `ListGet` needs to produce an element while preserving the list,
-so it requires the element type to support `Dup`.
+Collection reads are extractive: the returned collection is a residual state
+with the element/value moved out, not the original collection plus a copied
+element. The residual uses the same collection type; any hole/deletion
+bookkeeping is black-boxed inside collection builtins and later backend
+lowering. If a program wants to recover an equivalent original collection, it
+must duplicate the extracted value and reinsert one copy.
 
 ## Surface Syntax
 
@@ -413,8 +441,9 @@ applications while keeping proving efficient and lowering predictable.
 5. Infix operators are sugar for primitive calls. Primitive observer ops return
    their inputs unchanged, so reads do not force frontend-inserted `dup`.
 
-6. Function values are static function identifiers. Rich closure syntax should
-   lower to product data plus static apply functions.
+6. Function values are static function identifiers with unary packed
+   input/output types. Rich closure syntax should lower to product data plus
+   static apply functions.
 
 7. Collections are primitive type families because recursive types are not in
    the core.

@@ -103,6 +103,79 @@ fn product_capabilities_are_structural() {
 }
 
 #[test]
+fn composites_cannot_grant_capabilities_beyond_their_structure() {
+    let mut store = TypeStore::new();
+    let token = store
+        .add_primitive("Token", DeclaredCapabilities::linear())
+        .unwrap();
+
+    assert_eq!(
+        store
+            .add_product(
+                Some("CopyToken".into()),
+                vec![Component::named("token", token)],
+                DeclaredCapabilities::dup(),
+            )
+            .unwrap_err(),
+        TypeError::DeclaredCapabilityExceedsStructural {
+            declared: Capabilities {
+                dup: true,
+                zap: false,
+            },
+            structural: Capabilities::linear(),
+        }
+    );
+
+    assert_eq!(
+        store
+            .add_sum(
+                Some("DropToken".into()),
+                vec![Component::named("token", token)],
+                DeclaredCapabilities::zap(),
+            )
+            .unwrap_err(),
+        TypeError::DeclaredCapabilityExceedsStructural {
+            declared: Capabilities {
+                dup: false,
+                zap: true,
+            },
+            structural: Capabilities::linear(),
+        }
+    );
+}
+
+#[test]
+fn composite_declared_capabilities_may_confirm_structural_capabilities() {
+    let mut store = TypeStore::new();
+    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let pair = store
+        .add_product(
+            Some("Pair".into()),
+            vec![
+                Component::positional(0, u32_ty),
+                Component::positional(1, u32_ty),
+            ],
+            DeclaredCapabilities::dup(),
+        )
+        .unwrap();
+
+    assert_eq!(store.capabilities(pair).unwrap(), Capabilities::dup_zap());
+}
+
+#[test]
+fn primitive_capabilities_are_axiomatic() {
+    let mut store = TypeStore::new();
+    let copyable = store
+        .add_primitive("Copyable", DeclaredCapabilities::dup_zap())
+        .unwrap();
+
+    assert_eq!(
+        store.capabilities(copyable).unwrap(),
+        Capabilities::dup_zap()
+    );
+}
+
+#[test]
 fn function_types_have_dup_and_zap() {
     let mut store = TypeStore::new();
     let f = store

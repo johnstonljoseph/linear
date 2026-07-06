@@ -224,6 +224,7 @@ impl TypeStore {
                 return Err(TypeError::DuplicateName(name.clone()));
             }
         }
+        self.validate_declared_capabilities(&kind, declared)?;
         let id = TypeId(self.types.len() as u32);
         self.types.push(TypeDef {
             name: name.clone(),
@@ -234,6 +235,69 @@ impl TypeStore {
             self.names.insert(name, id);
         }
         Ok(id)
+    }
+
+    fn validate_declared_capabilities(
+        &self,
+        kind: &TypeKind,
+        declared: DeclaredCapabilities,
+    ) -> Result<(), TypeError> {
+        if matches!(kind, TypeKind::Primitive) {
+            return Ok(());
+        }
+        let structural = self.structural_capabilities_for_kind(kind)?;
+        let declared = declared.into_capabilities();
+        if structural.allows(declared) {
+            Ok(())
+        } else {
+            Err(TypeError::DeclaredCapabilityExceedsStructural {
+                declared,
+                structural,
+            })
+        }
+    }
+
+    fn structural_capabilities_for_kind(&self, kind: &TypeKind) -> Result<Capabilities, TypeError> {
+        match kind {
+            TypeKind::Never
+            | TypeKind::Unit
+            | TypeKind::Finite { .. }
+            | TypeKind::Function { .. }
+            | TypeKind::Symbol
+            | TypeKind::Text => Ok(Capabilities::dup_zap()),
+            TypeKind::Primitive => Ok(Capabilities::linear()),
+            TypeKind::List {
+                element,
+                mutability,
+            } => match mutability {
+                CollectionMutability::Mutable => Ok(Capabilities::linear()),
+                CollectionMutability::Immutable => self.capabilities(*element),
+            },
+            TypeKind::HashMap {
+                key,
+                value,
+                mutability,
+            } => match mutability {
+                CollectionMutability::Mutable => Ok(Capabilities::linear()),
+                CollectionMutability::Immutable => {
+                    let key_caps = self.capabilities(*key)?;
+                    let value_caps = self.capabilities(*value)?;
+                    Ok(Capabilities {
+                        dup: key_caps.dup && value_caps.dup,
+                        zap: key_caps.zap && value_caps.zap,
+                    })
+                }
+            },
+            TypeKind::Sum(components) | TypeKind::Product(components) => {
+                let mut caps = Capabilities::dup_zap();
+                for component in components {
+                    let component_caps = self.capabilities(component.ty)?;
+                    caps.dup &= component_caps.dup;
+                    caps.zap &= component_caps.zap;
+                }
+                Ok(caps)
+            }
+        }
     }
 
     fn validate_type(&self, id: TypeId) -> Result<(), TypeError> {
@@ -313,7 +377,11 @@ impl TypeStore {
                 caps
             }
         };
-        Ok(structural.or_declared(declared))
+        if matches!(&def.kind, TypeKind::Primitive) {
+            Ok(declared)
+        } else {
+            Ok(structural)
+        }
     }
 }
 
@@ -452,11 +520,8 @@ impl Capabilities {
         }
     }
 
-    fn or_declared(self, declared: Self) -> Self {
-        Self {
-            dup: self.dup || declared.dup,
-            zap: self.zap || declared.zap,
-        }
+    fn allows(self, requested: Self) -> bool {
+        (!requested.dup || self.dup) && (!requested.zap || self.zap)
     }
 }
 
@@ -468,6 +533,10 @@ pub enum TypeError {
     RecursiveType(TypeId),
     ZeroFiniteCardinality,
     UIntTooWide(u32),
+    DeclaredCapabilityExceedsStructural {
+        declared: Capabilities,
+        structural: Capabilities,
+    },
 }
 
 fn validate_name(name: &str) -> Result<(), TypeError> {

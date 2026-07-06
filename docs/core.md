@@ -69,10 +69,15 @@ explicit `Dup` and `Zap`. Collections come in two kinds:
   structurally from their contents;
 - mutable collections, which are linear even when their contents are copyable.
 
-Function types are inhabited only by global function identifiers. The language
-does not construct new runtime functions with lambdas, currying, partial
-application, or nested function definitions in the semantic core. Closure syntax
-is surface sugar over product values and global apply functions.
+Function types are inhabited only by global function identifiers. Function types
+are unary `A -> B`; multi-input or multi-output core functions are represented
+as first-class values by packing their inputs and outputs into products. Zero
+inputs or outputs pack as `unit`, one input or output is used directly, and
+multiple inputs or outputs pack into a product in declaration order.
+
+The language does not construct new runtime functions with lambdas, currying,
+partial application, or nested function definitions in the semantic core.
+Closure syntax is surface sugar over product values and global apply functions.
 
 ## Values
 
@@ -145,6 +150,11 @@ The type system does not model `unrestricted` as a third capability. Absence of
 type supports explicit copy/drop. Separately, global symbols and static function
 identifiers are a value/provenance rule: referencing them does not consume a
 local runtime resource.
+
+Declared capabilities on products, sums, and collections cannot exceed their
+structural capabilities. This prevents a wrapper around linear state from
+declaring `Dup` or `Zap` and forging extra handles or silently dropping state.
+Opaque primitive types may declare capabilities axiomatically.
 
 ## Functions
 
@@ -348,12 +358,16 @@ consume both operands and return both operands unchanged, followed by the
 visible result. For example, finite `add` has core result shape
 `(lhs, rhs, sum)`, and finite `lt` has result shape `(lhs, rhs, bool)`.
 
-Read-like operations still thread the collection through. For example,
-`ListGet` consumes `list, index` and returns `list, element`. Element reads
-currently require the element type to support `Dup`, because the list keeps its
-copy while the result receives another copy. `HashMapGetOr` requires the value
-type to support both `Dup` and `Zap`: it duplicates stored values on hits and
-drops the default value on hits.
+Read-like operations are extractive. For example, `ListGet` consumes
+`list, index` and returns `list, element`, where the returned list is the
+residual collection with the element moved out. `HashMapGetOr` likewise returns
+the residual map and the moved-out or default value. The residual has the same
+surface/core type as the original collection; any hole or deletion bookkeeping
+is a collection-builtin/backend responsibility, not a user-visible type.
+
+Because elements are moved out, these operations do not require element/value
+`Dup`. If a program wants both the extracted element and a restored equivalent
+collection, it must explicitly duplicate the element, then reinsert one copy.
 
 Built-in collection operations will declare version metadata axiomatically.
 

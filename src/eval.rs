@@ -235,7 +235,13 @@ impl<'a> Evaluator<'a> {
             Expr::CallValue { function, arg } => match consume(env, *function)? {
                 Value::Function(function) => {
                     let arg = consume(env, *arg)?;
-                    self.run_function_inner(function, vec![arg], steps)
+                    let callee = self
+                        .program
+                        .get(function)
+                        .ok_or(EvalError::UnknownFunction(function))?;
+                    let args = unpack_call_value_arg(arg, callee.inputs.len())?;
+                    let values = self.run_function_inner(function, args, steps)?;
+                    Ok(vec![pack_call_value_output(values)])
                 }
                 actual => Err(EvalError::RuntimeType {
                     expected: "function",
@@ -363,15 +369,15 @@ impl<'a> Evaluator<'a> {
             }
             BuiltinOp::ListGet { .. } => {
                 let [list, index] = expect_array(args)?;
-                let list = expect_list(list)?;
+                let mut list = expect_list(list)?;
                 let index = expect_finite(index)? as usize;
-                let element = list
-                    .get(index)
-                    .cloned()
-                    .ok_or(EvalError::IndexOutOfBounds {
+                if index >= list.len() {
+                    return Err(EvalError::IndexOutOfBounds {
                         index,
                         len: list.len(),
-                    })?;
+                    });
+                }
+                let element = list.remove(index);
                 Ok(vec![Value::List(list), element])
             }
             BuiltinOp::HashMapEmpty { .. } => Ok(vec![Value::HashMap(BTreeMap::new())]),
@@ -383,8 +389,8 @@ impl<'a> Evaluator<'a> {
             }
             BuiltinOp::HashMapGetOr { .. } => {
                 let [map, key, default] = expect_array(args)?;
-                let map = expect_map(map)?;
-                let value = map.get(&key).cloned().unwrap_or(default);
+                let mut map = expect_map(map)?;
+                let value = map.remove(&key).unwrap_or(default);
                 Ok(vec![Value::HashMap(map), value])
             }
             BuiltinOp::HashMapContains { .. } => {
@@ -421,6 +427,38 @@ fn bool_value(value: bool) -> Value {
     Value::Sum {
         variant: usize::from(value),
         payload: Box::new(Value::Unit),
+    }
+}
+
+fn unpack_call_value_arg(arg: Value, arity: usize) -> Result<Vec<Value>, EvalError> {
+    match arity {
+        0 => match arg {
+            Value::Unit => Ok(Vec::new()),
+            actual => Err(EvalError::RuntimeType {
+                expected: "unit",
+                actual,
+            }),
+        },
+        1 => Ok(vec![arg]),
+        expected => match arg {
+            Value::Product(fields) if fields.len() == expected => Ok(fields),
+            Value::Product(fields) => Err(EvalError::Arity {
+                expected,
+                actual: fields.len(),
+            }),
+            actual => Err(EvalError::RuntimeType {
+                expected: "product",
+                actual,
+            }),
+        },
+    }
+}
+
+fn pack_call_value_output(values: Vec<Value>) -> Value {
+    match values.len() {
+        0 => Value::Unit,
+        1 => values.into_iter().next().expect("checked arity"),
+        _ => Value::Product(values),
     }
 }
 

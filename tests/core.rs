@@ -711,10 +711,74 @@ fn builtin_list_build_len_and_get_check_and_run() {
             .run_function(function, vec![])
             .unwrap(),
         vec![
-            Value::List(vec![Value::Finite(10), Value::Finite(20)]),
+            Value::List(vec![Value::Finite(10)]),
             Value::Finite(2),
             Value::Finite(20),
         ]
+    );
+}
+
+#[test]
+fn builtin_list_get_extracts_linear_elements() {
+    let mut types = TypeStore::new();
+    let token = token_type(&mut types);
+    let u32_ty = u32_type(&mut types);
+    let list_ty = types
+        .add_vector(
+            Some("MutableVectorToken".into()),
+            token,
+            CollectionMutability::Mutable,
+        )
+        .unwrap();
+    let mut program = CoreProgram::new();
+    let function = program
+        .add_function(Function {
+            name: Some("take_token".into()),
+            inputs: vec![Param::new(ValueId(0), token)],
+            outputs: vec![list_ty, token],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1)],
+                    Expr::Builtin {
+                        op: BuiltinOp::ListEmpty { list_ty },
+                        args: vec![],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(2)],
+                    Expr::Builtin {
+                        op: BuiltinOp::ListPush { list_ty },
+                        args: vec![ValueId(1), ValueId(0)],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 0,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(4), ValueId(5)],
+                    Expr::Builtin {
+                        op: BuiltinOp::ListGet {
+                            list_ty,
+                            index_ty: u32_ty,
+                        },
+                        args: vec![ValueId(2), ValueId(3)],
+                    },
+                ),
+            ],
+            returns: vec![ValueId(4), ValueId(5)],
+        })
+        .unwrap();
+
+    assert_eq!(program.check(&types), Ok(()));
+    assert_eq!(
+        Evaluator::new(&types, &program)
+            .run_function(function, vec![Value::Symbol("token".into())])
+            .unwrap(),
+        vec![Value::List(vec![]), Value::Symbol("token".into())]
     );
 }
 
@@ -885,9 +949,87 @@ fn builtin_hashmap_check_and_run() {
     assert_eq!(
         output[2],
         Value::Sum {
-            variant: 1,
+            variant: 0,
             payload: Box::new(Value::Unit),
         }
+    );
+}
+
+#[test]
+fn builtin_hashmap_get_or_extracts_linear_values() {
+    let mut types = TypeStore::new();
+    let u32_ty = u32_type(&mut types);
+    let token = token_type(&mut types);
+    let map_ty = types
+        .add_hashmap(
+            Some("HashMapU32Token".into()),
+            u32_ty,
+            token,
+            CollectionMutability::Mutable,
+        )
+        .unwrap();
+    let mut program = CoreProgram::new();
+    let function = program
+        .add_function(Function {
+            name: Some("take_token_from_map".into()),
+            inputs: vec![Param::new(ValueId(0), token), Param::new(ValueId(1), token)],
+            outputs: vec![map_ty, token],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2)],
+                    Expr::Builtin {
+                        op: BuiltinOp::HashMapEmpty { map_ty },
+                        args: vec![],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 7,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(4)],
+                    Expr::Builtin {
+                        op: BuiltinOp::HashMapInsert { map_ty },
+                        args: vec![ValueId(2), ValueId(3), ValueId(0)],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(5)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 7,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(6), ValueId(7)],
+                    Expr::Builtin {
+                        op: BuiltinOp::HashMapGetOr { map_ty },
+                        args: vec![ValueId(4), ValueId(5), ValueId(1)],
+                    },
+                ),
+            ],
+            returns: vec![ValueId(6), ValueId(7)],
+        })
+        .unwrap();
+
+    assert_eq!(program.check(&types), Ok(()));
+    assert_eq!(
+        Evaluator::new(&types, &program)
+            .run_function(
+                function,
+                vec![
+                    Value::Symbol("stored".into()),
+                    Value::Symbol("default".into())
+                ],
+            )
+            .unwrap(),
+        vec![
+            Value::HashMap(std::collections::BTreeMap::new()),
+            Value::Symbol("stored".into()),
+        ]
     );
 }
 
@@ -1069,6 +1211,91 @@ fn static_function_values_check_and_run() {
             .run_function(apply, vec![])
             .unwrap(),
         vec![Value::Finite(42)]
+    );
+}
+
+#[test]
+fn static_function_values_pack_multiple_inputs_and_outputs() {
+    let mut types = TypeStore::new();
+    let u32_ty = u32_type(&mut types);
+    let pair_ty = types
+        .add_product(
+            Some("U32Pair".into()),
+            vec![
+                Component::positional(0, u32_ty),
+                Component::positional(1, u32_ty),
+            ],
+            DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    let fn_ty = types
+        .add_function(Some("PairToPair".into()), pair_ty, pair_ty)
+        .unwrap();
+    let mut program = CoreProgram::new();
+    let swap = program
+        .add_function(Function {
+            name: Some("swap".into()),
+            inputs: vec![
+                Param::new(ValueId(0), u32_ty),
+                Param::new(ValueId(1), u32_ty),
+            ],
+            outputs: vec![u32_ty, u32_ty],
+            body: vec![],
+            returns: vec![ValueId(1), ValueId(0)],
+        })
+        .unwrap();
+    let apply = program
+        .add_function(Function {
+            name: Some("apply_swap".into()),
+            inputs: vec![],
+            outputs: vec![pair_ty],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2)],
+                    Expr::FunctionRef {
+                        ty: fn_ty,
+                        function: swap,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 10,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(4)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 32,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(5)],
+                    Expr::Product {
+                        ty: pair_ty,
+                        fields: vec![ValueId(3), ValueId(4)],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(6)],
+                    Expr::CallValue {
+                        function: ValueId(2),
+                        arg: ValueId(5),
+                    },
+                ),
+            ],
+            returns: vec![ValueId(6)],
+        })
+        .unwrap();
+
+    assert_eq!(program.check(&types), Ok(()));
+    assert_eq!(
+        Evaluator::new(&types, &program)
+            .run_function(apply, vec![])
+            .unwrap(),
+        vec![Value::Product(vec![Value::Finite(32), Value::Finite(10)])]
     );
 }
 
