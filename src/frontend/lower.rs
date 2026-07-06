@@ -2,16 +2,17 @@ use std::collections::HashMap;
 
 use crate::TypeId;
 use crate::core::{
-    BuiltinOp, CoreError, CoreProgram, Expr as CoreExpr, Function, GlobalDecl, Param as CoreParam,
-    Statement,
+    BuiltinOp, CoreError, CoreProgram, Expr as CoreExpr, Function, GlobalDecl,
+    MatchArm as CoreMatchArm, Param as CoreParam, Statement,
 };
 use crate::frontend::{
-    Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, Module,
-    Param as FrontendParam, TypeExpr, ValueFlow,
+    Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item,
+    MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, TypeExpr, ValueFlow,
 };
 use crate::id::{FunctionId, GlobalId, ValueId};
 use crate::types::{
-    CollectionMutability, Component, DeclaredCapabilities, TypeError, TypeKind, TypeStore,
+    CollectionMutability, Component, ComponentName, DeclaredCapabilities, TypeError, TypeKind,
+    TypeStore,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -604,22 +605,16 @@ impl<'a> BodyLowerer<'a> {
             .collect()
     }
 
-    fn bind_pattern(
-        &mut self,
-        pattern: &crate::frontend::Pattern,
-        value: LoweredValue,
-    ) -> Result<(), LowerError> {
+    fn bind_pattern(&mut self, pattern: &Pattern, value: LoweredValue) -> Result<(), LowerError> {
         match pattern {
-            crate::frontend::Pattern::Name(name) => {
+            Pattern::Name(name) => {
                 if self.env.insert(name.clone(), value).is_some() {
                     return Err(LowerError::DuplicateValue(name.clone()));
                 }
                 Ok(())
             }
-            crate::frontend::Pattern::Wildcard => {
-                self.push_statement(vec![], CoreExpr::Zap { value: value.id })
-            }
-            crate::frontend::Pattern::Unit => {
+            Pattern::Wildcard => self.push_statement(vec![], CoreExpr::Zap { value: value.id }),
+            Pattern::Unit => {
                 if value.ty != self.types.unit() {
                     return Err(LowerError::TypeMismatch {
                         expected: self.types.unit(),
@@ -628,10 +623,71 @@ impl<'a> BodyLowerer<'a> {
                 }
                 self.push_statement(vec![], CoreExpr::Zap { value: value.id })
             }
-            crate::frontend::Pattern::Tuple(_) | crate::frontend::Pattern::Record(_) => Err(
-                LowerError::UnsupportedExpression("destructuring patterns are not lowered yet"),
-            ),
+            Pattern::Tuple(patterns) => self.bind_tuple_pattern(patterns, value),
+            Pattern::Record(fields) => self.bind_record_pattern(fields, value),
         }
+    }
+
+    fn bind_tuple_pattern(
+        &mut self,
+        patterns: &[Pattern],
+        value: LoweredValue,
+    ) -> Result<(), LowerError> {
+        let fields = self.product_fields(value.ty)?;
+        if patterns.len() != fields.len() {
+            return Err(LowerError::Core(CoreError::ResultArity {
+                expected: fields.len(),
+                actual: patterns.len(),
+            }));
+        }
+        let result_ids = fields
+            .iter()
+            .map(|_| self.fresh_value())
+            .collect::<Vec<_>>();
+        self.push_statement(
+            result_ids.clone(),
+            CoreExpr::SplitProduct { value: value.id },
+        )?;
+        for ((pattern, field), id) in patterns.iter().zip(fields).zip(result_ids) {
+            self.bind_pattern(pattern, LoweredValue { id, ty: field.ty })?;
+        }
+        Ok(())
+    }
+
+    fn bind_record_pattern(
+        &mut self,
+        patterns: &[Field<Pattern>],
+        value: LoweredValue,
+    ) -> Result<(), LowerError> {
+        let fields = self.product_fields(value.ty)?;
+        if patterns.len() != fields.len() {
+            return Err(LowerError::Core(CoreError::ResultArity {
+                expected: fields.len(),
+                actual: patterns.len(),
+            }));
+        }
+        let result_ids = fields
+            .iter()
+            .map(|_| self.fresh_value())
+            .collect::<Vec<_>>();
+        self.push_statement(
+            result_ids.clone(),
+            CoreExpr::SplitProduct { value: value.id },
+        )?;
+
+        for (field, id) in fields.into_iter().zip(result_ids) {
+            let ComponentName::Named(name) = &field.name else {
+                return Err(LowerError::UnsupportedExpression(
+                    "record patterns require named product fields",
+                ));
+            };
+            let pattern = patterns
+                .iter()
+                .find(|pattern| pattern.name.as_deref() == Some(name.as_str()))
+                .ok_or_else(|| LowerError::UnknownValue(name.clone()))?;
+            self.bind_pattern(&pattern.value, LoweredValue { id, ty: field.ty })?;
+        }
+        Ok(())
     }
 
     fn lower_expr(
@@ -655,14 +711,19 @@ impl<'a> BodyLowerer<'a> {
             Expr::Product(_) => Err(LowerError::UnsupportedExpression(
                 "product literals need constructor context",
             )),
-            Expr::String(_)
-            | Expr::Block(_)
-            | Expr::MethodCall { .. }
-            | Expr::FieldAccess { .. }
-            | Expr::Match { .. }
-            | Expr::If { .. } => Err(LowerError::UnsupportedExpression(
-                "expression form is not lowered yet",
-            )),
+            Expr::FieldAccess { receiver, field } => {
+                self.lower_field_access(receiver, field, expected)
+            }
+            Expr::MethodCall {
+                receiver,
+                receiver_flow,
+                method,
+                args,
+            } => self.lower_method_call(receiver, *receiver_flow, method, args, expected),
+            Expr::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, expected),
+            Expr::String(_) | Expr::Block(_) | Expr::If { .. } => Err(
+                LowerError::UnsupportedExpression("expression form is not lowered yet"),
+            ),
         }
     }
 
@@ -709,6 +770,14 @@ impl<'a> BodyLowerer<'a> {
         args: &[Arg],
         expected: Option<TypeId>,
     ) -> Result<LoweredValue, LowerError> {
+        if let Expr::FieldAccess { receiver, field } = callee {
+            if let Expr::Name(type_name) = receiver.as_ref() {
+                if let Some(ty) = self.types.type_id(type_name) {
+                    return self.lower_enum_constructor_call(type_name, ty, field, args, expected);
+                }
+            }
+        }
+
         let Expr::Name(name) = callee else {
             return Err(LowerError::UnsupportedExpression(
                 "only direct calls are lowered yet",
@@ -724,6 +793,46 @@ impl<'a> BodyLowerer<'a> {
         }
 
         Err(LowerError::UnknownValue(name.clone()))
+    }
+
+    fn lower_field_access(
+        &mut self,
+        receiver: &Expr,
+        field: &str,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        if let Expr::Name(type_name) = receiver {
+            if let Some(ty) = self.types.type_id(type_name) {
+                return self.lower_unit_enum_constructor(type_name, ty, field, expected);
+            }
+        }
+        Err(LowerError::UnsupportedExpression(
+            "field access is not lowered yet",
+        ))
+    }
+
+    fn lower_method_call(
+        &mut self,
+        receiver: &Expr,
+        receiver_flow: ValueFlow,
+        method: &str,
+        args: &[Arg],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        if let Expr::Name(type_name) = receiver {
+            if let Some(ty) = self.types.type_id(type_name) {
+                if receiver_flow != ValueFlow::ReturnedUnchanged {
+                    return Err(LowerError::FlowMismatch {
+                        expected: ValueFlow::ReturnedUnchanged,
+                        actual: receiver_flow,
+                    });
+                }
+                return self.lower_enum_constructor_call(type_name, ty, method, args, expected);
+            }
+        }
+        Err(LowerError::UnsupportedExpression(
+            "method calls are not lowered yet",
+        ))
     }
 
     fn lower_function_call(
@@ -938,6 +1047,269 @@ impl<'a> BodyLowerer<'a> {
         Ok(values)
     }
 
+    fn lower_unit_enum_constructor(
+        &mut self,
+        type_name: &str,
+        ty: TypeId,
+        variant_name: &str,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let (variant, payload_ty) = self.enum_variant(type_name, ty, variant_name)?;
+        if payload_ty != self.types.unit() {
+            return Err(LowerError::Core(CoreError::ResultArity {
+                expected: 1,
+                actual: 0,
+            }));
+        }
+        let payload = self.lower_unit_payload()?;
+        self.lower_enum_inject(ty, variant, payload, expected)
+    }
+
+    fn lower_enum_constructor_call(
+        &mut self,
+        type_name: &str,
+        ty: TypeId,
+        variant_name: &str,
+        args: &[Arg],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let (variant, payload_ty) = self.enum_variant(type_name, ty, variant_name)?;
+        let payload = self.lower_variant_payload(type_name, payload_ty, args)?;
+        self.lower_enum_inject(ty, variant, payload, expected)
+    }
+
+    fn lower_enum_inject(
+        &mut self,
+        ty: TypeId,
+        variant: usize,
+        payload: LoweredValue,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        if let Some(expected) = expected {
+            if expected != ty {
+                return Err(LowerError::TypeMismatch {
+                    expected,
+                    actual: ty,
+                });
+            }
+        }
+        let id = self.fresh_value();
+        self.push_statement(
+            vec![id],
+            CoreExpr::SumInject {
+                ty,
+                variant,
+                payload: payload.id,
+            },
+        )?;
+        Ok(LoweredValue { id, ty })
+    }
+
+    fn lower_variant_payload(
+        &mut self,
+        constructor: &str,
+        payload_ty: TypeId,
+        args: &[Arg],
+    ) -> Result<LoweredValue, LowerError> {
+        if payload_ty == self.types.unit() {
+            if !args.is_empty() {
+                return Err(LowerError::Core(CoreError::ResultArity {
+                    expected: 0,
+                    actual: args.len(),
+                }));
+            }
+            return self.lower_unit_payload();
+        }
+
+        if let TypeKind::Product(fields) = self
+            .types
+            .get(payload_ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(payload_ty)))?
+            .kind
+            .clone()
+        {
+            let field_values = match args {
+                [arg] => match &arg.value {
+                    Expr::Product(surface_fields) => {
+                        self.lower_product_fields(constructor, &fields, surface_fields)?
+                    }
+                    value => {
+                        if fields.len() != 1 {
+                            return Err(LowerError::Core(CoreError::ResultArity {
+                                expected: fields.len(),
+                                actual: 1,
+                            }));
+                        }
+                        vec![self.lower_expr(value, Some(fields[0].ty))?.id]
+                    }
+                },
+                _ => {
+                    if args.len() != fields.len() {
+                        return Err(LowerError::Core(CoreError::ResultArity {
+                            expected: fields.len(),
+                            actual: args.len(),
+                        }));
+                    }
+                    args.iter()
+                        .zip(&fields)
+                        .map(|(arg, field)| {
+                            self.lower_expr(&arg.value, Some(field.ty))
+                                .map(|value| value.id)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+            };
+
+            let id = self.fresh_value();
+            self.push_statement(
+                vec![id],
+                CoreExpr::Product {
+                    ty: payload_ty,
+                    fields: field_values,
+                },
+            )?;
+            return Ok(LoweredValue { id, ty: payload_ty });
+        }
+
+        let [arg] = args else {
+            return Err(LowerError::Core(CoreError::ResultArity {
+                expected: 1,
+                actual: args.len(),
+            }));
+        };
+        self.lower_expr(&arg.value, Some(payload_ty))
+    }
+
+    fn lower_unit_payload(&mut self) -> Result<LoweredValue, LowerError> {
+        let id = self.fresh_value();
+        self.push_statement(vec![id], CoreExpr::Unit)?;
+        Ok(LoweredValue {
+            id,
+            ty: self.types.unit(),
+        })
+    }
+
+    fn enum_variant(
+        &self,
+        type_name: &str,
+        ty: TypeId,
+        variant_name: &str,
+    ) -> Result<(usize, TypeId), LowerError> {
+        let TypeKind::Sum(variants) = self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+            .clone()
+        else {
+            return Err(LowerError::UnsupportedExpression(
+                "only enum variants can be constructed with dot syntax",
+            ));
+        };
+        variants
+            .iter()
+            .enumerate()
+            .find_map(|(index, variant)| match &variant.name {
+                ComponentName::Named(name) if name == variant_name => Some((index, variant.ty)),
+                _ => None,
+            })
+            .ok_or_else(|| LowerError::UnknownValue(format!("{type_name}.{variant_name}")))
+    }
+
+    fn lower_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[FrontendMatchArm],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let scrutinee_name = match scrutinee {
+            Expr::Name(name) if self.env.contains_key(name) => Some(name.clone()),
+            _ => None,
+        };
+        let scrutinee = self.lower_expr(scrutinee, None)?;
+        let variants = self.sum_variants(scrutinee.ty)?;
+        let payload_id = self.fresh_value();
+        let mut core_arms = Vec::with_capacity(arms.len());
+
+        for arm in arms {
+            let (variant, payload_ty) = find_variant(&variants, &arm.variant)
+                .ok_or_else(|| LowerError::UnknownValue(arm.variant.clone()))?;
+            let mut arm_lowerer = self.arm_lowerer(scrutinee_name.as_deref(), payload_id);
+            let payload = LoweredValue {
+                id: payload_id,
+                ty: payload_ty,
+            };
+            match &arm.payload {
+                Some(pattern) => arm_lowerer.bind_pattern(pattern, payload)?,
+                None => {
+                    arm_lowerer.push_statement(vec![], CoreExpr::Zap { value: payload.id })?;
+                }
+            }
+            let arm_block = expr_as_block(&arm.body);
+            let (body, returns) = arm_lowerer.lower_block(&arm_block, expected)?;
+            core_arms.push(CoreMatchArm::new(variant, payload_id, body, returns));
+        }
+
+        if let Some(name) = &scrutinee_name {
+            self.env.remove(name);
+        }
+
+        let result_count = self
+            .params
+            .iter()
+            .filter(|param| param.flow != ValueFlow::NotReturned)
+            .count()
+            + usize::from(expected.is_some());
+        let result_ids = (0..result_count)
+            .map(|_| self.fresh_value())
+            .collect::<Vec<_>>();
+        self.push_statement(
+            result_ids.clone(),
+            CoreExpr::Match {
+                scrutinee: scrutinee.id,
+                arms: core_arms,
+            },
+        )?;
+
+        for (param, id) in self
+            .params
+            .iter()
+            .filter(|param| param.flow != ValueFlow::NotReturned)
+            .zip(result_ids.iter().copied())
+        {
+            self.env
+                .insert(param.name.clone(), LoweredValue { id, ty: param.ty });
+        }
+
+        if let Some(ty) = expected {
+            let id = result_ids[result_count - 1];
+            Ok(LoweredValue { id, ty })
+        } else {
+            let id = self.fresh_value();
+            self.push_statement(vec![id], CoreExpr::Unit)?;
+            Ok(LoweredValue {
+                id,
+                ty: self.types.unit(),
+            })
+        }
+    }
+
+    fn arm_lowerer(&self, consumed_name: Option<&str>, payload_id: ValueId) -> BodyLowerer<'a> {
+        let mut env = self.env.clone();
+        if let Some(name) = consumed_name {
+            env.remove(name);
+        }
+        BodyLowerer {
+            types: self.types,
+            program: self.program,
+            call_signatures: self.call_signatures,
+            params: self.params.clone(),
+            env,
+            body: Vec::new(),
+            next_value: payload_id.0 + 1,
+        }
+    }
+
     fn lower_binary(
         &mut self,
         lhs: &Expr,
@@ -1108,6 +1480,32 @@ impl<'a> BodyLowerer<'a> {
         Ok(())
     }
 
+    fn product_fields(&self, ty: TypeId) -> Result<Vec<Component>, LowerError> {
+        let TypeKind::Product(fields) = self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+            .clone()
+        else {
+            return Err(LowerError::Core(CoreError::NotProduct(ty)));
+        };
+        Ok(fields)
+    }
+
+    fn sum_variants(&self, ty: TypeId) -> Result<Vec<Component>, LowerError> {
+        let TypeKind::Sum(variants) = self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+            .clone()
+        else {
+            return Err(LowerError::Core(CoreError::NotSum(ty)));
+        };
+        Ok(variants)
+    }
+
     fn param_flow(&self, name: &str) -> Option<ValueFlow> {
         self.params
             .iter()
@@ -1195,6 +1593,26 @@ fn core_output_types(unit: TypeId, params: &[LoweredParam], output: TypeId) -> V
 
 fn visible_output(types: &TypeStore, output: TypeId) -> Option<TypeId> {
     (output != types.unit()).then_some(output)
+}
+
+fn find_variant(variants: &[Component], name: &str) -> Option<(usize, TypeId)> {
+    variants
+        .iter()
+        .enumerate()
+        .find_map(|(index, variant)| match &variant.name {
+            ComponentName::Named(variant_name) if variant_name == name => Some((index, variant.ty)),
+            _ => None,
+        })
+}
+
+fn expr_as_block(expr: &Expr) -> Block {
+    match expr {
+        Expr::Block(block) => block.clone(),
+        expr => Block {
+            lets: Vec::new(),
+            result: Some(Box::new(expr.clone())),
+        },
+    }
 }
 
 fn type_expr_core_name(ty: &TypeExpr) -> Result<String, LowerError> {

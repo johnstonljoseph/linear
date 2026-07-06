@@ -194,6 +194,8 @@ The first body-lowering pass supports a deliberately small executable subset:
 - direct calls to known functions, including hidden threaded return values;
 - references to declared globals;
 - product constructors such as `Pair { left: x, right: y }`;
+- enum constructors such as `Maybe.some(x)` and `Maybe.none`;
+- `match` over enums, including tuple and record payload patterns;
 - finite `+`, `-`, `*`, `==`, `<`, and `>` over integer-like finite types.
 
 Body lowering automatically returns every non-`take` parameter first. The final
@@ -219,10 +221,10 @@ without `take`, the surface argument must be a name so the callee's hidden
 returned value can be rebound to that name. For `take` arguments, ordinary
 expressions are allowed.
 
-It lowers free functions and impl methods into checked core functions. Complex
-patterns, field access, methods at call sites, `if`, `match`, string literals,
-enum constructors, and collection operations are still intentionally rejected
-until their lowering rules are added.
+It lowers free functions and impl methods into checked core functions. Ordinary
+field access, non-constructor methods at call sites, `if`, string literals, and
+collection operations are still intentionally rejected until their lowering
+rules are added.
 
 ## Value Flow Markers
 

@@ -503,6 +503,112 @@ fn lowers_product_constructor_bodies() {
 }
 
 #[test]
+fn lowers_enum_constructors() {
+    let module = frontend::parse_module(
+        r#"
+        enum MaybeU32 { none, some(u32) }
+
+        fn make_none() -> MaybeU32 {
+          MaybeU32.none
+        }
+
+        fn make_some(take value: u32) -> MaybeU32 {
+          MaybeU32.some(value)
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let make_none = lowered.program.function_id("make_none").unwrap();
+    let make_some = lowered.program.function_id("make_some").unwrap();
+    let evaluator = Evaluator::new(&lowered.types, &lowered.program);
+
+    assert_eq!(
+        evaluator.run_function(make_none, vec![]).unwrap(),
+        vec![Value::Sum {
+            variant: 0,
+            payload: Box::new(Value::Unit),
+        }]
+    );
+    assert_eq!(
+        evaluator
+            .run_function(make_some, vec![Value::Finite(9)])
+            .unwrap(),
+        vec![Value::Sum {
+            variant: 1,
+            payload: Box::new(Value::Finite(9)),
+        }]
+    );
+}
+
+#[test]
+fn lowers_match_with_record_payload_patterns() {
+    let module = frontend::parse_module(
+        r#"
+        enum Decision {
+          allow { reason: u32 },
+          deny,
+        }
+
+        fn reason(take decision: Decision) -> u32 {
+          match decision {
+            .allow { reason }: reason,
+            .deny: 0,
+          }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let reason = lowered.program.function_id("reason").unwrap();
+    let decision = Value::Sum {
+        variant: 0,
+        payload: Box::new(Value::Product(vec![Value::Finite(12)])),
+    };
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(reason, vec![decision])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(12)]);
+}
+
+#[test]
+fn match_branches_thread_unchanged_params() {
+    let module = frontend::parse_module(
+        r#"
+        enum MaybeU32 { none, some(u32) }
+
+        fn score(config: u32, take value: MaybeU32) -> u32 {
+          match value {
+            .none: config + 1,
+            .some(x): x + config,
+          }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let score = lowered.program.function_id("score").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(
+            score,
+            vec![
+                Value::Finite(4),
+                Value::Sum {
+                    variant: 1,
+                    payload: Box::new(Value::Finite(10)),
+                },
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(4), Value::Finite(14)]);
+}
+
+#[test]
 fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
     let module = frontend::parse_module(
         r#"
@@ -517,7 +623,7 @@ fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
 
     assert_eq!(
         frontend::lower_module_bodies(&module).unwrap_err(),
-        frontend::LowerError::UnsupportedExpression("expression form is not lowered yet")
+        frontend::LowerError::UnsupportedExpression("field access is not lowered yet")
     );
 
     let module = frontend::parse_module(
