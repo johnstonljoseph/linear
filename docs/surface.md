@@ -169,6 +169,19 @@ The signature lowering pass builds on this and registers:
 - inherent impl methods, with `self` expanded to the impl target type;
 - trait impl methods as named functions, without lowering trait semantics yet.
 
+Surface function output means the visible suffix after threaded values. Core
+function outputs are formed by first appending every non-`take` parameter type,
+in declaration order, then appending the visible surface output when it is not
+unit.
+
+```linear
+fn step(mut state: State, config: Config, take event: Event) -> Decision
+```
+
+lowers to a core function returning `(State, Config, Decision)`. `State` is the
+changed threaded value, `Config` is the unchanged threaded value, and `Decision`
+is the visible result.
+
 The resulting `CoreProgram` is a name/type skeleton. Function bodies are kept as
 frontend AST for the later body-lowering pass, so the skeleton is not expected
 to pass core checking yet.
@@ -178,10 +191,29 @@ The first body-lowering pass supports a deliberately small executable subset:
 - function parameters and local names;
 - `let name = expr` and typed scalar lets;
 - integer literals;
-- direct calls to known functions;
+- direct calls to known functions, including hidden threaded return values;
 - references to declared globals;
 - product constructors such as `Pair { left: x, right: y }`;
 - finite `+`, `-`, `*`, `==`, `<`, and `>` over integer-like finite types.
+
+Body lowering automatically returns every non-`take` parameter first. The final
+body expression supplies only the visible surface result. Returned-unchanged
+parameters are auto-duplicated when read, so this:
+
+```linear
+fn copy_return(x: u32) -> u32 {
+  x
+}
+```
+
+returns `(x, x)` at core level. `mut` parameters are not auto-duplicated; if a
+body consumes one without rebinding it through a call result, the core checker
+rejects the function.
+
+Calls consume all arguments at core level. For any callee argument declared
+without `take`, the surface argument must be a name so the callee's hidden
+returned value can be rebound to that name. For `take` arguments, ordinary
+expressions are allowed.
 
 It lowers free functions and impl methods into checked core functions. Complex
 patterns, field access, methods at call sites, `if`, `match`, string literals,
@@ -196,8 +228,10 @@ At function definitions and call sites:
 - `mut`: the argument is returned changed;
 - `take`: the argument is consumed and not returned.
 
-Markers can appear before parameters and before call arguments. For method
-syntax, a marker between the method name and the argument list marks the
+Markers can appear before parameters and before call arguments. Call-site
+markers are optional when the callee signature already determines the flow, but
+they are useful documentation and mismatched explicit markers are rejected. For
+method syntax, a marker between the method name and the argument list marks the
 receiver:
 
 ```linear
@@ -209,7 +243,9 @@ cache.insert mut(key: "latest", take value: event)
 ```
 
 This is documentation and sugar for value threading. The checker/lowerer must
-eventually verify that the body agrees with the declared flow.
+verify that the body agrees with the declared flow; current lowering makes the
+threaded return convention explicit and leaves detailed linear-use validation to
+the core checker.
 
 ## Open Syntax
 

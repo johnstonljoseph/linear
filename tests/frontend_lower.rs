@@ -174,8 +174,8 @@ fn lowers_global_and_function_signatures() {
         struct User { id: UserId, balance: u32 }
         global root: User
 
-        fn deposit(mut user: User, amount: u32) -> User {
-          user
+        fn decide(mut user: User, config: u32, take event: UserId) -> Bool {
+          true
         }
         "#,
     )
@@ -183,6 +183,7 @@ fn lowers_global_and_function_signatures() {
 
     let lowered = frontend::lower_module_signatures(&module).unwrap();
     let user = lowered.types.type_id("User").unwrap();
+    let bool_ty = lowered.types.type_id("Bool").unwrap();
     let u32_ty = lowered.types.type_id("u32").unwrap();
 
     assert_eq!(lowered.globals.len(), 1);
@@ -194,21 +195,24 @@ fn lowers_global_and_function_signatures() {
     );
 
     assert_eq!(lowered.functions.len(), 1);
-    let deposit = &lowered.functions[0];
-    assert_eq!(deposit.name, "deposit");
-    assert_eq!(deposit.output, user);
-    assert_eq!(lowered.program.function_id("deposit"), Some(deposit.id));
-    assert_eq!(deposit.params.len(), 2);
-    assert_eq!(deposit.params[0].flow, ValueFlow::ReturnedChanged);
-    assert_eq!(deposit.params[0].name, "user");
-    assert_eq!(deposit.params[0].ty, user);
-    assert_eq!(deposit.params[1].flow, ValueFlow::ReturnedUnchanged);
-    assert_eq!(deposit.params[1].name, "amount");
-    assert_eq!(deposit.params[1].ty, u32_ty);
+    let decide = &lowered.functions[0];
+    assert_eq!(decide.name, "decide");
+    assert_eq!(decide.output, bool_ty);
+    assert_eq!(lowered.program.function_id("decide"), Some(decide.id));
+    assert_eq!(decide.params.len(), 3);
+    assert_eq!(decide.params[0].flow, ValueFlow::ReturnedChanged);
+    assert_eq!(decide.params[0].name, "user");
+    assert_eq!(decide.params[0].ty, user);
+    assert_eq!(decide.params[1].flow, ValueFlow::ReturnedUnchanged);
+    assert_eq!(decide.params[1].name, "config");
+    assert_eq!(decide.params[1].ty, u32_ty);
+    assert_eq!(decide.params[2].flow, ValueFlow::NotReturned);
+    assert_eq!(decide.params[2].name, "event");
+    assert_eq!(decide.params[2].ty, u32_ty);
 
-    let shell = lowered.program.get(deposit.id).unwrap();
-    assert_eq!(shell.inputs.len(), 2);
-    assert_eq!(shell.outputs, vec![user]);
+    let shell = lowered.program.get(decide.id).unwrap();
+    assert_eq!(shell.inputs.len(), 3);
+    assert_eq!(shell.outputs, vec![user, u32_ty, bool_ty]);
     assert!(shell.body.is_empty());
     assert!(shell.returns.is_empty());
 }
@@ -224,8 +228,8 @@ fn lowers_impl_method_signatures_with_expanded_self() {
             self.balance
           }
 
-          fn with_balance(mut self, balance: u32) -> User {
-            self
+          fn with_balance(mut self, take balance: u32) -> () {
+            ()
           }
         }
         "#,
@@ -258,8 +262,10 @@ fn lowers_impl_method_signatures_with_expanded_self() {
         ValueFlow::ReturnedChanged
     );
     assert_eq!(with_balance.function.params[0].ty, user);
+    assert_eq!(with_balance.function.params[1].flow, ValueFlow::NotReturned);
     assert_eq!(with_balance.function.params[1].ty, u32_ty);
-    assert_eq!(with_balance.function.output, user);
+    assert_eq!(with_balance.function.output, lowered.types.unit());
+    assert_eq!(with_balance.function.core_outputs, vec![user]);
 }
 
 #[test]
@@ -322,12 +328,12 @@ fn signature_lowering_rejects_duplicate_names_and_generic_functions() {
 fn lowers_and_runs_simple_arithmetic_bodies() {
     let module = frontend::parse_module(
         r#"
-        fn add(x: u32, y: u32) -> u32 {
+        fn add(take x: u32, take y: u32) -> u32 {
           x + y
         }
 
-        fn add_one(x: u32) -> u32 {
-          add(x, 1)
+        fn add_one(take x: u32) -> u32 {
+          add(take x, 1)
         }
         "#,
     )
@@ -340,6 +346,80 @@ fn lowers_and_runs_simple_arithmetic_bodies() {
         .unwrap();
 
     assert_eq!(result, vec![Value::Finite(42)]);
+}
+
+#[test]
+fn returned_unchanged_params_are_duplicated_for_reads() {
+    let module = frontend::parse_module(
+        r#"
+        fn copy_return(x: u32) -> u32 {
+          x
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("copy_return").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(7)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(7), Value::Finite(7)]);
+}
+
+#[test]
+fn calls_rebind_hidden_returned_arguments() {
+    let module = frontend::parse_module(
+        r#"
+        fn pass(mut state: u32, config: u32, take event: u32) -> u32 {
+          event
+        }
+
+        fn caller(mut state: u32, config: u32, take event: u32) -> u32 {
+          pass(mut state, config, take event)
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("caller").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(
+            function,
+            vec![Value::Finite(1), Value::Finite(2), Value::Finite(3)],
+        )
+        .unwrap();
+
+    assert_eq!(
+        result,
+        vec![Value::Finite(1), Value::Finite(2), Value::Finite(3)]
+    );
+}
+
+#[test]
+fn body_lowering_rejects_mutating_an_unchanged_threaded_param() {
+    let module = frontend::parse_module(
+        r#"
+        fn touch(mut x: u32) -> () {
+          ()
+        }
+
+        fn bad(x: u32) -> () {
+          touch(x)
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::FlowMismatch {
+            expected: ValueFlow::ReturnedUnchanged,
+            actual: ValueFlow::ReturnedChanged,
+        }
+    );
 }
 
 #[test]
@@ -363,9 +443,12 @@ fn lowers_let_bindings_globals_and_comparisons() {
     assert_eq!(core_function.inputs.len(), 1);
     assert_eq!(
         core_function.outputs,
-        vec![lowered.types.type_id("Bool").unwrap()]
+        vec![
+            lowered.types.type_id("u32").unwrap(),
+            lowered.types.type_id("Bool").unwrap(),
+        ]
     );
-    assert_eq!(core_function.returns.len(), 1);
+    assert_eq!(core_function.returns.len(), 2);
 }
 
 #[test]
@@ -374,7 +457,7 @@ fn lowers_product_constructor_bodies() {
         r#"
         struct Pair { left: u32, right: u32 }
 
-        fn make_pair(left: u32, right: u32) -> Pair {
+        fn make_pair(take left: u32, take right: u32) -> Pair {
           Pair { left: left, right: right }
         }
         "#,
@@ -413,7 +496,7 @@ fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
 
     let module = frontend::parse_module(
         r#"
-        fn leak(x: u32, y: u32) -> u32 {
+        fn leak(take x: u32, take y: u32) -> u32 {
           x
         }
         "#,

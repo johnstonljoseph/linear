@@ -42,6 +42,7 @@ pub struct LoweredFunction {
     pub name: String,
     pub params: Vec<LoweredParam>,
     pub output: TypeId,
+    pub core_outputs: Vec<TypeId>,
     pub body: Block,
 }
 
@@ -92,6 +93,14 @@ pub enum LowerError {
         expected: usize,
         actual: usize,
     },
+    MissingResult {
+        expected: TypeId,
+    },
+    FlowMismatch {
+        expected: ValueFlow,
+        actual: ValueFlow,
+    },
+    ExpectedNameForReturnedArgument,
 }
 
 pub fn lower_type_items(module: &Module) -> Result<LoweredTypes, LowerError> {
@@ -110,10 +119,17 @@ pub fn lower_module_signatures(module: &Module) -> Result<LoweredModule, LowerEr
 
 pub fn lower_module_bodies(module: &Module) -> Result<LoweredModule, LowerError> {
     let mut lowered = lower_module_signatures(module)?;
+    let call_signatures = build_call_signatures(&lowered);
 
     for function in lowered.functions.clone() {
-        let (body, returns) = BodyLowerer::new(&lowered.types, &lowered.program, &function.params)
-            .lower_block(&function.body, Some(function.output))?;
+        let expected_output = visible_output(&lowered.types, function.output);
+        let (body, returns) = BodyLowerer::new(
+            &lowered.types,
+            &lowered.program,
+            &call_signatures,
+            &function.params,
+        )
+        .lower_block(&function.body, expected_output)?;
         lowered
             .program
             .replace_function_body(function.id, body, returns)?;
@@ -121,8 +137,14 @@ pub fn lower_module_bodies(module: &Module) -> Result<LoweredModule, LowerError>
 
     for method in lowered.methods.clone() {
         let function = method.function;
-        let (body, returns) = BodyLowerer::new(&lowered.types, &lowered.program, &function.params)
-            .lower_block(&function.body, Some(function.output))?;
+        let expected_output = visible_output(&lowered.types, function.output);
+        let (body, returns) = BodyLowerer::new(
+            &lowered.types,
+            &lowered.program,
+            &call_signatures,
+            &function.params,
+        )
+        .lower_block(&function.body, expected_output)?;
         lowered
             .program
             .replace_function_body(function.id, body, returns)?;
@@ -299,13 +321,14 @@ impl TypeLowerer {
         reject_generics(&function.name, &function.generics)?;
         let params = self.lower_params(&function.params)?;
         let output = self.lower_type_expr(&function.output)?;
+        let core_outputs = core_output_types(self.types.unit(), &params, output);
         let id = program.add_function(Function {
             name: Some(core_name.to_owned()),
             inputs: params
                 .iter()
                 .map(|param| CoreParam::new(param.id, param.ty))
                 .collect(),
-            outputs: vec![output],
+            outputs: core_outputs.clone(),
             body: Vec::<Statement>::new(),
             returns: Vec::new(),
         })?;
@@ -314,6 +337,7 @@ impl TypeLowerer {
             name: core_name.to_owned(),
             params,
             output,
+            core_outputs,
             body: function.body.clone(),
         })
     }
@@ -454,16 +478,29 @@ struct LoweredValue {
     ty: TypeId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CallableSignature {
+    params: Vec<LoweredParam>,
+    visible_output: Option<TypeId>,
+}
+
 struct BodyLowerer<'a> {
     types: &'a TypeStore,
     program: &'a CoreProgram,
+    call_signatures: &'a HashMap<FunctionId, CallableSignature>,
+    params: Vec<LoweredParam>,
     env: HashMap<String, LoweredValue>,
     body: Vec<Statement>,
     next_value: u32,
 }
 
 impl<'a> BodyLowerer<'a> {
-    fn new(types: &'a TypeStore, program: &'a CoreProgram, params: &[LoweredParam]) -> Self {
+    fn new(
+        types: &'a TypeStore,
+        program: &'a CoreProgram,
+        call_signatures: &'a HashMap<FunctionId, CallableSignature>,
+        params: &[LoweredParam],
+    ) -> Self {
         let env = params
             .iter()
             .map(|param| {
@@ -479,6 +516,8 @@ impl<'a> BodyLowerer<'a> {
         Self {
             types,
             program,
+            call_signatures,
+            params: params.to_vec(),
             env,
             body: Vec::new(),
             next_value: params.len() as u32,
@@ -504,23 +543,59 @@ impl<'a> BodyLowerer<'a> {
             self.bind_pattern(&let_stmt.pattern, value)?;
         }
 
-        let returns = match &block.result {
-            Some(result) => {
-                let value = self.lower_expr(result, expected_result)?;
-                if let Some(expected) = expected_result {
-                    if value.ty != expected {
-                        return Err(LowerError::TypeMismatch {
-                            expected,
-                            actual: value.ty,
-                        });
-                    }
-                }
-                vec![value.id]
-            }
-            None => Vec::new(),
-        };
+        let explicit_result =
+            self.lower_optional_result(block.result.as_deref(), expected_result)?;
+        let mut returns = self.implicit_return_values()?;
+        if let Some(result) = explicit_result {
+            returns.push(result.id);
+        }
 
         Ok((self.body, returns))
+    }
+
+    fn lower_optional_result(
+        &mut self,
+        result: Option<&Expr>,
+        expected_result: Option<TypeId>,
+    ) -> Result<Option<LoweredValue>, LowerError> {
+        match (result, expected_result) {
+            (Some(result), Some(expected)) => {
+                let value = self.lower_expr(result, Some(expected))?;
+                if value.ty != expected {
+                    return Err(LowerError::TypeMismatch {
+                        expected,
+                        actual: value.ty,
+                    });
+                }
+                Ok(Some(value))
+            }
+            (Some(result), None) => {
+                let value = self.lower_expr(result, Some(self.types.unit()))?;
+                if value.ty != self.types.unit() {
+                    return Err(LowerError::TypeMismatch {
+                        expected: self.types.unit(),
+                        actual: value.ty,
+                    });
+                }
+                self.push_statement(vec![], CoreExpr::Zap { value: value.id })?;
+                Ok(None)
+            }
+            (None, Some(expected)) => Err(LowerError::MissingResult { expected }),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn implicit_return_values(&self) -> Result<Vec<ValueId>, LowerError> {
+        self.params
+            .iter()
+            .filter(|param| param.flow != ValueFlow::NotReturned)
+            .map(|param| {
+                self.env
+                    .get(&param.name)
+                    .map(|value| value.id)
+                    .ok_or_else(|| LowerError::UnknownValue(param.name.clone()))
+            })
+            .collect()
     }
 
     fn bind_pattern(
@@ -587,6 +662,9 @@ impl<'a> BodyLowerer<'a> {
 
     fn lower_name(&mut self, name: &str) -> Result<LoweredValue, LowerError> {
         if let Some(value) = self.env.get(name).copied() {
+            if self.param_flow(name) == Some(ValueFlow::ReturnedUnchanged) {
+                return self.dup_returned_unchanged_param(name, value);
+            }
             return Ok(value);
         }
         if let Some(global) = self.program.global_decl_id(name) {
@@ -600,6 +678,30 @@ impl<'a> BodyLowerer<'a> {
             return Ok(LoweredValue { id, ty });
         }
         Err(LowerError::UnknownValue(name.to_owned()))
+    }
+
+    fn dup_returned_unchanged_param(
+        &mut self,
+        name: &str,
+        value: LoweredValue,
+    ) -> Result<LoweredValue, LowerError> {
+        if !self.types.can_dup(value.ty)? {
+            return Err(LowerError::Core(CoreError::CannotDup(value.ty)));
+        }
+        let used = self.fresh_value();
+        let kept = self.fresh_value();
+        self.push_statement(vec![used, kept], CoreExpr::Dup { value: value.id })?;
+        self.env.insert(
+            name.to_owned(),
+            LoweredValue {
+                id: kept,
+                ty: value.ty,
+            },
+        );
+        Ok(LoweredValue {
+            id: used,
+            ty: value.ty,
+        })
     }
 
     fn lower_int(
@@ -651,27 +753,42 @@ impl<'a> BodyLowerer<'a> {
         function: FunctionId,
         args: &[Arg],
     ) -> Result<LoweredValue, LowerError> {
-        let signature = self
+        let core_signature = self
             .program
             .get(function)
             .ok_or(CoreError::UnknownFunction(function))?;
-        if signature.outputs.len() != 1 {
-            return Err(LowerError::FunctionOutputArity {
-                name: name.to_owned(),
-                expected: 1,
-                actual: signature.outputs.len(),
-            });
-        }
-        if args.len() != signature.inputs.len() {
+        let call_signature =
+            self.call_signatures
+                .get(&function)
+                .ok_or_else(|| LowerError::FunctionOutputArity {
+                    name: name.to_owned(),
+                    expected: 1,
+                    actual: core_signature.outputs.len(),
+                })?;
+
+        if args.len() != core_signature.inputs.len() {
             return Err(LowerError::Core(CoreError::ResultArity {
-                expected: signature.inputs.len(),
+                expected: core_signature.inputs.len(),
                 actual: args.len(),
             }));
         }
 
         let mut arg_values = Vec::with_capacity(args.len());
-        for (arg, input) in args.iter().zip(&signature.inputs) {
-            let value = self.lower_expr(&arg.value, Some(input.ty))?;
+        let mut returned_arg_names = Vec::new();
+        for ((arg, input), param) in args
+            .iter()
+            .zip(&core_signature.inputs)
+            .zip(&call_signature.params)
+        {
+            self.check_arg_flow(arg.flow, param.flow)?;
+            let value = if param.flow == ValueFlow::NotReturned {
+                self.lower_expr(&arg.value, Some(input.ty))?
+            } else {
+                let (name, value) = self.lower_returned_call_arg(arg)?;
+                self.check_returned_arg_rebind_flow(&name, param.flow)?;
+                returned_arg_names.push(name);
+                value
+            };
             if value.ty != input.ty {
                 return Err(LowerError::TypeMismatch {
                     expected: input.ty,
@@ -681,16 +798,75 @@ impl<'a> BodyLowerer<'a> {
             arg_values.push(value.id);
         }
 
-        let id = self.fresh_value();
-        let ty = signature.outputs[0];
+        let result_ids = core_signature
+            .outputs
+            .iter()
+            .map(|_| self.fresh_value())
+            .collect::<Vec<_>>();
         self.push_statement(
-            vec![id],
+            result_ids.clone(),
             CoreExpr::Call {
                 function,
                 args: arg_values,
             },
         )?;
-        Ok(LoweredValue { id, ty })
+
+        let hidden_return_count = returned_arg_names.len();
+        for (name, (id, ty)) in returned_arg_names.into_iter().zip(
+            result_ids
+                .iter()
+                .copied()
+                .zip(core_signature.outputs.iter().copied()),
+        ) {
+            self.env.insert(name, LoweredValue { id, ty });
+        }
+
+        if let Some(ty) = call_signature.visible_output {
+            let id = result_ids[hidden_return_count];
+            Ok(LoweredValue { id, ty })
+        } else {
+            let id = self.fresh_value();
+            self.push_statement(vec![id], CoreExpr::Unit)?;
+            Ok(LoweredValue {
+                id,
+                ty: self.types.unit(),
+            })
+        }
+    }
+
+    fn lower_returned_call_arg(&self, arg: &Arg) -> Result<(String, LoweredValue), LowerError> {
+        let Expr::Name(name) = &arg.value else {
+            return Err(LowerError::ExpectedNameForReturnedArgument);
+        };
+        let value = self
+            .env
+            .get(name)
+            .copied()
+            .ok_or_else(|| LowerError::UnknownValue(name.clone()))?;
+        Ok((name.clone(), value))
+    }
+
+    fn check_arg_flow(&self, actual: ValueFlow, expected: ValueFlow) -> Result<(), LowerError> {
+        if actual != ValueFlow::ReturnedUnchanged && actual != expected {
+            return Err(LowerError::FlowMismatch { expected, actual });
+        }
+        Ok(())
+    }
+
+    fn check_returned_arg_rebind_flow(
+        &self,
+        name: &str,
+        callee_flow: ValueFlow,
+    ) -> Result<(), LowerError> {
+        if self.param_flow(name) == Some(ValueFlow::ReturnedUnchanged)
+            && callee_flow == ValueFlow::ReturnedChanged
+        {
+            return Err(LowerError::FlowMismatch {
+                expected: ValueFlow::ReturnedUnchanged,
+                actual: ValueFlow::ReturnedChanged,
+            });
+        }
+        Ok(())
     }
 
     fn lower_constructor_call(
@@ -892,6 +1068,13 @@ impl<'a> BodyLowerer<'a> {
         self.body.push(Statement::new(results, expr));
         Ok(())
     }
+
+    fn param_flow(&self, name: &str) -> Option<ValueFlow> {
+        self.params
+            .iter()
+            .find(|param| param.name == name)
+            .map(|param| param.flow)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -936,6 +1119,43 @@ fn expect_arity<'a, const N: usize>(
         });
     }
     Ok(args.try_into().expect("arity checked"))
+}
+
+fn build_call_signatures(lowered: &LoweredModule) -> HashMap<FunctionId, CallableSignature> {
+    let mut signatures = HashMap::new();
+    for function in &lowered.functions {
+        signatures.insert(function.id, callable_signature(&lowered.types, function));
+    }
+    for method in &lowered.methods {
+        signatures.insert(
+            method.function.id,
+            callable_signature(&lowered.types, &method.function),
+        );
+    }
+    signatures
+}
+
+fn callable_signature(types: &TypeStore, function: &LoweredFunction) -> CallableSignature {
+    CallableSignature {
+        params: function.params.clone(),
+        visible_output: visible_output(types, function.output),
+    }
+}
+
+fn core_output_types(unit: TypeId, params: &[LoweredParam], output: TypeId) -> Vec<TypeId> {
+    let mut outputs = params
+        .iter()
+        .filter(|param| param.flow != ValueFlow::NotReturned)
+        .map(|param| param.ty)
+        .collect::<Vec<_>>();
+    if output != unit {
+        outputs.push(output);
+    }
+    outputs
+}
+
+fn visible_output(types: &TypeStore, output: TypeId) -> Option<TypeId> {
+    (output != types.unit()).then_some(output)
 }
 
 fn type_expr_core_name(ty: &TypeExpr) -> Result<String, LowerError> {
