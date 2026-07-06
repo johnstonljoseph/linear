@@ -63,6 +63,22 @@ impl CoreProgram {
         self.functions.get(id.index())
     }
 
+    pub fn get_mut(&mut self, id: FunctionId) -> Option<&mut Function> {
+        self.functions.get_mut(id.index())
+    }
+
+    pub fn replace_function_body(
+        &mut self,
+        id: FunctionId,
+        body: Vec<Statement>,
+        returns: Vec<ValueId>,
+    ) -> Result<(), CoreError> {
+        let function = self.get_mut(id).ok_or(CoreError::UnknownFunction(id))?;
+        function.body = body;
+        function.returns = returns;
+        Ok(())
+    }
+
     pub fn get_global_decl(&self, id: GlobalId) -> Option<&GlobalDecl> {
         self.global_decls.get(id.index())
     }

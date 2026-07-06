@@ -173,6 +173,21 @@ The resulting `CoreProgram` is a name/type skeleton. Function bodies are kept as
 frontend AST for the later body-lowering pass, so the skeleton is not expected
 to pass core checking yet.
 
+The first body-lowering pass supports a deliberately small executable subset:
+
+- function parameters and local names;
+- `let name = expr` and typed scalar lets;
+- integer literals;
+- direct calls to known functions;
+- references to declared globals;
+- product constructors such as `Pair { left: x, right: y }`;
+- finite `+`, `-`, `*`, `==`, `<`, and `>` over integer-like finite types.
+
+It lowers free functions and impl methods into checked core functions. Complex
+patterns, field access, methods at call sites, `if`, `match`, string literals,
+enum constructors, and collection operations are still intentionally rejected
+until their lowering rules are added.
+
 ## Value Flow Markers
 
 At function definitions and call sites:

@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 
 use crate::TypeId;
-use crate::core::{CoreError, CoreProgram, Function, GlobalDecl, Param as CoreParam, Statement};
+use crate::core::{
+    BuiltinOp, CoreError, CoreProgram, Expr as CoreExpr, Function, GlobalDecl, Param as CoreParam,
+    Statement,
+};
 use crate::frontend::{
-    Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, Module,
+    Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, Module,
     Param as FrontendParam, TypeExpr, ValueFlow,
 };
 use crate::id::{FunctionId, GlobalId, ValueId};
-use crate::types::{CollectionMutability, Component, DeclaredCapabilities, TypeError, TypeStore};
+use crate::types::{
+    CollectionMutability, Component, DeclaredCapabilities, TypeError, TypeKind, TypeStore,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoweredTypes {
@@ -75,6 +80,18 @@ pub enum LowerError {
         name: String,
     },
     UnsupportedAnonymousImplTarget,
+    UnsupportedExpression(&'static str),
+    UnknownValue(String),
+    DuplicateValue(String),
+    TypeMismatch {
+        expected: TypeId,
+        actual: TypeId,
+    },
+    FunctionOutputArity {
+        name: String,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 pub fn lower_type_items(module: &Module) -> Result<LoweredTypes, LowerError> {
@@ -89,6 +106,30 @@ pub fn lower_module_signatures(module: &Module) -> Result<LoweredModule, LowerEr
     let mut lowerer = TypeLowerer::new_with_standard_types()?;
     lowerer.lower_module(module)?;
     lowerer.lower_signatures(module)
+}
+
+pub fn lower_module_bodies(module: &Module) -> Result<LoweredModule, LowerError> {
+    let mut lowered = lower_module_signatures(module)?;
+
+    for function in lowered.functions.clone() {
+        let (body, returns) = BodyLowerer::new(&lowered.types, &lowered.program, &function.params)
+            .lower_block(&function.body, Some(function.output))?;
+        lowered
+            .program
+            .replace_function_body(function.id, body, returns)?;
+    }
+
+    for method in lowered.methods.clone() {
+        let function = method.function;
+        let (body, returns) = BodyLowerer::new(&lowered.types, &lowered.program, &function.params)
+            .lower_block(&function.body, Some(function.output))?;
+        lowered
+            .program
+            .replace_function_body(function.id, body, returns)?;
+    }
+
+    lowered.program.check(&lowered.types)?;
+    Ok(lowered)
 }
 
 struct TypeLowerer {
@@ -404,6 +445,452 @@ impl TypeLowerer {
         };
         self.anonymous.insert(key, id);
         Ok(id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoweredValue {
+    id: ValueId,
+    ty: TypeId,
+}
+
+struct BodyLowerer<'a> {
+    types: &'a TypeStore,
+    program: &'a CoreProgram,
+    env: HashMap<String, LoweredValue>,
+    body: Vec<Statement>,
+    next_value: u32,
+}
+
+impl<'a> BodyLowerer<'a> {
+    fn new(types: &'a TypeStore, program: &'a CoreProgram, params: &[LoweredParam]) -> Self {
+        let env = params
+            .iter()
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    LoweredValue {
+                        id: param.id,
+                        ty: param.ty,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            types,
+            program,
+            env,
+            body: Vec::new(),
+            next_value: params.len() as u32,
+        }
+    }
+
+    fn lower_block(
+        mut self,
+        block: &Block,
+        expected_result: Option<TypeId>,
+    ) -> Result<(Vec<Statement>, Vec<ValueId>), LowerError> {
+        for let_stmt in &block.lets {
+            let value = self.lower_expr(&let_stmt.value, None)?;
+            if let Some(ty) = &let_stmt.ty {
+                let expected = self.resolve_existing_type(ty)?;
+                if value.ty != expected {
+                    return Err(LowerError::TypeMismatch {
+                        expected,
+                        actual: value.ty,
+                    });
+                }
+            }
+            self.bind_pattern(&let_stmt.pattern, value)?;
+        }
+
+        let returns = match &block.result {
+            Some(result) => {
+                let value = self.lower_expr(result, expected_result)?;
+                if let Some(expected) = expected_result {
+                    if value.ty != expected {
+                        return Err(LowerError::TypeMismatch {
+                            expected,
+                            actual: value.ty,
+                        });
+                    }
+                }
+                vec![value.id]
+            }
+            None => Vec::new(),
+        };
+
+        Ok((self.body, returns))
+    }
+
+    fn bind_pattern(
+        &mut self,
+        pattern: &crate::frontend::Pattern,
+        value: LoweredValue,
+    ) -> Result<(), LowerError> {
+        match pattern {
+            crate::frontend::Pattern::Name(name) => {
+                if self.env.insert(name.clone(), value).is_some() {
+                    return Err(LowerError::DuplicateValue(name.clone()));
+                }
+                Ok(())
+            }
+            crate::frontend::Pattern::Wildcard => {
+                self.push_statement(vec![], CoreExpr::Zap { value: value.id })
+            }
+            crate::frontend::Pattern::Unit => {
+                if value.ty != self.types.unit() {
+                    return Err(LowerError::TypeMismatch {
+                        expected: self.types.unit(),
+                        actual: value.ty,
+                    });
+                }
+                self.push_statement(vec![], CoreExpr::Zap { value: value.id })
+            }
+            crate::frontend::Pattern::Tuple(_) | crate::frontend::Pattern::Record(_) => Err(
+                LowerError::UnsupportedExpression("destructuring patterns are not lowered yet"),
+            ),
+        }
+    }
+
+    fn lower_expr(
+        &mut self,
+        expr: &Expr,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        match expr {
+            Expr::Name(name) => self.lower_name(name),
+            Expr::Int(value) => self.lower_int(*value, expected),
+            Expr::Unit => {
+                let id = self.fresh_value();
+                self.push_statement(vec![id], CoreExpr::Unit)?;
+                Ok(LoweredValue {
+                    id,
+                    ty: self.types.unit(),
+                })
+            }
+            Expr::Call { callee, args } => self.lower_call(callee, args, expected),
+            Expr::Binary { lhs, op, rhs } => self.lower_binary(lhs, *op, rhs),
+            Expr::Product(_) => Err(LowerError::UnsupportedExpression(
+                "product literals need constructor context",
+            )),
+            Expr::String(_)
+            | Expr::Block(_)
+            | Expr::MethodCall { .. }
+            | Expr::FieldAccess { .. }
+            | Expr::Match { .. }
+            | Expr::If { .. } => Err(LowerError::UnsupportedExpression(
+                "expression form is not lowered yet",
+            )),
+        }
+    }
+
+    fn lower_name(&mut self, name: &str) -> Result<LoweredValue, LowerError> {
+        if let Some(value) = self.env.get(name).copied() {
+            return Ok(value);
+        }
+        if let Some(global) = self.program.global_decl_id(name) {
+            let ty = self
+                .program
+                .get_global_decl(global)
+                .ok_or(CoreError::UnknownGlobal(global))?
+                .ty;
+            let id = self.fresh_value();
+            self.push_statement(vec![id], CoreExpr::Global { global })?;
+            return Ok(LoweredValue { id, ty });
+        }
+        Err(LowerError::UnknownValue(name.to_owned()))
+    }
+
+    fn lower_int(
+        &mut self,
+        value: u128,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let ty = match expected {
+            Some(ty) => {
+                self.require_finite(ty)?;
+                ty
+            }
+            None => self
+                .types
+                .type_id("u32")
+                .ok_or_else(|| LowerError::UnknownType("u32".into()))?,
+        };
+        let id = self.fresh_value();
+        self.push_statement(vec![id], CoreExpr::FiniteLiteral { ty, value })?;
+        Ok(LoweredValue { id, ty })
+    }
+
+    fn lower_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Arg],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let Expr::Name(name) = callee else {
+            return Err(LowerError::UnsupportedExpression(
+                "only direct calls are lowered yet",
+            ));
+        };
+
+        if let Some(function) = self.program.function_id(name) {
+            return self.lower_function_call(name, function, args);
+        }
+
+        if let Some(ty) = self.types.type_id(name) {
+            return self.lower_constructor_call(name, ty, args, expected);
+        }
+
+        Err(LowerError::UnknownValue(name.clone()))
+    }
+
+    fn lower_function_call(
+        &mut self,
+        name: &str,
+        function: FunctionId,
+        args: &[Arg],
+    ) -> Result<LoweredValue, LowerError> {
+        let signature = self
+            .program
+            .get(function)
+            .ok_or(CoreError::UnknownFunction(function))?;
+        if signature.outputs.len() != 1 {
+            return Err(LowerError::FunctionOutputArity {
+                name: name.to_owned(),
+                expected: 1,
+                actual: signature.outputs.len(),
+            });
+        }
+        if args.len() != signature.inputs.len() {
+            return Err(LowerError::Core(CoreError::ResultArity {
+                expected: signature.inputs.len(),
+                actual: args.len(),
+            }));
+        }
+
+        let mut arg_values = Vec::with_capacity(args.len());
+        for (arg, input) in args.iter().zip(&signature.inputs) {
+            let value = self.lower_expr(&arg.value, Some(input.ty))?;
+            if value.ty != input.ty {
+                return Err(LowerError::TypeMismatch {
+                    expected: input.ty,
+                    actual: value.ty,
+                });
+            }
+            arg_values.push(value.id);
+        }
+
+        let id = self.fresh_value();
+        let ty = signature.outputs[0];
+        self.push_statement(
+            vec![id],
+            CoreExpr::Call {
+                function,
+                args: arg_values,
+            },
+        )?;
+        Ok(LoweredValue { id, ty })
+    }
+
+    fn lower_constructor_call(
+        &mut self,
+        name: &str,
+        ty: TypeId,
+        args: &[Arg],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        if let Some(expected) = expected {
+            if expected != ty {
+                return Err(LowerError::TypeMismatch {
+                    expected,
+                    actual: ty,
+                });
+            }
+        }
+        let TypeKind::Product(fields) = self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+            .clone()
+        else {
+            return Err(LowerError::UnsupportedExpression(
+                "only product constructors are lowered yet",
+            ));
+        };
+
+        let field_values = match args {
+            [arg] => match &arg.value {
+                Expr::Product(surface_fields) => {
+                    self.lower_product_fields(name, &fields, surface_fields)?
+                }
+                value => {
+                    if fields.len() != 1 {
+                        return Err(LowerError::Core(CoreError::ResultArity {
+                            expected: fields.len(),
+                            actual: 1,
+                        }));
+                    }
+                    vec![self.lower_expr(value, Some(fields[0].ty))?.id]
+                }
+            },
+            _ => {
+                if args.len() != fields.len() {
+                    return Err(LowerError::Core(CoreError::ResultArity {
+                        expected: fields.len(),
+                        actual: args.len(),
+                    }));
+                }
+                args.iter()
+                    .zip(&fields)
+                    .map(|(arg, field)| self.lower_expr(&arg.value, Some(field.ty)).map(|v| v.id))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+
+        let id = self.fresh_value();
+        self.push_statement(
+            vec![id],
+            CoreExpr::Product {
+                ty,
+                fields: field_values,
+            },
+        )?;
+        Ok(LoweredValue { id, ty })
+    }
+
+    fn lower_product_fields(
+        &mut self,
+        constructor: &str,
+        expected: &[Component],
+        surface: &[Field<Expr>],
+    ) -> Result<Vec<ValueId>, LowerError> {
+        let mut values = Vec::with_capacity(expected.len());
+        for (index, component) in expected.iter().enumerate() {
+            let surface_field = match &component.name {
+                crate::types::ComponentName::Named(name) => surface
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some(name.as_str())),
+                crate::types::ComponentName::Index(index) => surface.get(*index),
+            }
+            .ok_or_else(|| LowerError::UnknownValue(format!("{constructor}.field{index}")))?;
+            values.push(
+                self.lower_expr(&surface_field.value, Some(component.ty))?
+                    .id,
+            );
+        }
+        Ok(values)
+    }
+
+    fn lower_binary(
+        &mut self,
+        lhs: &Expr,
+        op: BinaryOp,
+        rhs: &Expr,
+    ) -> Result<LoweredValue, LowerError> {
+        let lhs = self.lower_expr(lhs, None)?;
+        self.require_finite(lhs.ty)?;
+        let rhs = self.lower_expr(rhs, Some(lhs.ty))?;
+        if rhs.ty != lhs.ty {
+            return Err(LowerError::TypeMismatch {
+                expected: lhs.ty,
+                actual: rhs.ty,
+            });
+        }
+
+        let bool_ty = self
+            .types
+            .type_id("Bool")
+            .ok_or_else(|| LowerError::UnknownType("Bool".into()))?;
+        let id = self.fresh_value();
+        let (core_op, args, ty) = match op {
+            BinaryOp::Add => (
+                BuiltinOp::FiniteAdd { ty: lhs.ty },
+                vec![lhs.id, rhs.id],
+                lhs.ty,
+            ),
+            BinaryOp::Sub => (
+                BuiltinOp::FiniteSub { ty: lhs.ty },
+                vec![lhs.id, rhs.id],
+                lhs.ty,
+            ),
+            BinaryOp::Mul => (
+                BuiltinOp::FiniteMul { ty: lhs.ty },
+                vec![lhs.id, rhs.id],
+                lhs.ty,
+            ),
+            BinaryOp::Eq => (
+                BuiltinOp::FiniteEq {
+                    ty: lhs.ty,
+                    bool_ty,
+                },
+                vec![lhs.id, rhs.id],
+                bool_ty,
+            ),
+            BinaryOp::Lt => (
+                BuiltinOp::FiniteLt {
+                    ty: lhs.ty,
+                    bool_ty,
+                },
+                vec![lhs.id, rhs.id],
+                bool_ty,
+            ),
+            BinaryOp::Gt => (
+                BuiltinOp::FiniteLt {
+                    ty: lhs.ty,
+                    bool_ty,
+                },
+                vec![rhs.id, lhs.id],
+                bool_ty,
+            ),
+            BinaryOp::Div | BinaryOp::NotEq | BinaryOp::Lte | BinaryOp::Gte => {
+                return Err(LowerError::UnsupportedExpression(
+                    "binary operator is not lowered yet",
+                ));
+            }
+        };
+        self.push_statement(vec![id], CoreExpr::Builtin { op: core_op, args })?;
+        Ok(LoweredValue { id, ty })
+    }
+
+    fn resolve_existing_type(&self, ty: &TypeExpr) -> Result<TypeId, LowerError> {
+        match ty {
+            TypeExpr::Unit => Ok(self.types.unit()),
+            TypeExpr::Name(name) => self
+                .types
+                .type_id(name)
+                .ok_or_else(|| LowerError::UnknownType(name.clone())),
+            TypeExpr::Apply { .. }
+            | TypeExpr::Product(_)
+            | TypeExpr::Sum(_)
+            | TypeExpr::Function { .. } => Err(LowerError::UnsupportedExpression(
+                "complex let type annotations are not lowered yet",
+            )),
+        }
+    }
+
+    fn require_finite(&self, ty: TypeId) -> Result<(), LowerError> {
+        match &self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+        {
+            TypeKind::Finite { .. } => Ok(()),
+            _ => Err(LowerError::Core(CoreError::NotFinite(ty))),
+        }
+    }
+
+    fn fresh_value(&mut self) -> ValueId {
+        let id = ValueId(self.next_value);
+        self.next_value += 1;
+        id
+    }
+
+    fn push_statement(&mut self, results: Vec<ValueId>, expr: CoreExpr) -> Result<(), LowerError> {
+        self.body.push(Statement::new(results, expr));
+        Ok(())
     }
 }
 

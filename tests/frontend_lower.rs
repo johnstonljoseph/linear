@@ -1,6 +1,7 @@
 use linear::frontend::ValueFlow;
 use linear::{
-    CollectionMutability, Component, ComponentName, CoreError, TypeError, TypeKind, frontend,
+    CollectionMutability, Component, ComponentName, CoreError, Evaluator, TypeError, TypeKind,
+    Value, frontend,
 };
 
 fn lower(src: &str) -> linear::TypeStore {
@@ -314,5 +315,113 @@ fn signature_lowering_rejects_duplicate_names_and_generic_functions() {
     assert_eq!(
         frontend::lower_module_signatures(&module).unwrap_err(),
         frontend::LowerError::UnsupportedGenericDecl { name: "id".into() }
+    );
+}
+
+#[test]
+fn lowers_and_runs_simple_arithmetic_bodies() {
+    let module = frontend::parse_module(
+        r#"
+        fn add(x: u32, y: u32) -> u32 {
+          x + y
+        }
+
+        fn add_one(x: u32) -> u32 {
+          add(x, 1)
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let add_one = lowered.program.function_id("add_one").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(add_one, vec![Value::Finite(41)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(42)]);
+}
+
+#[test]
+fn lowers_let_bindings_globals_and_comparisons() {
+    let module = frontend::parse_module(
+        r#"
+        global root: u32
+
+        fn below_root(x: u32) -> Bool {
+          let limit: u32 = root
+          x < limit
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("below_root").unwrap();
+    let core_function = lowered.program.get(function).unwrap();
+
+    assert_eq!(core_function.inputs.len(), 1);
+    assert_eq!(
+        core_function.outputs,
+        vec![lowered.types.type_id("Bool").unwrap()]
+    );
+    assert_eq!(core_function.returns.len(), 1);
+}
+
+#[test]
+fn lowers_product_constructor_bodies() {
+    let module = frontend::parse_module(
+        r#"
+        struct Pair { left: u32, right: u32 }
+
+        fn make_pair(left: u32, right: u32) -> Pair {
+          Pair { left: left, right: right }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let make_pair = lowered.program.function_id("make_pair").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(make_pair, vec![Value::Finite(3), Value::Finite(5)])
+        .unwrap();
+
+    assert_eq!(
+        result,
+        vec![Value::Product(vec![Value::Finite(3), Value::Finite(5)])]
+    );
+}
+
+#[test]
+fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
+    let module = frontend::parse_module(
+        r#"
+        struct Pair { left: u32, right: u32 }
+
+        fn bad(pair: Pair) -> u32 {
+          pair.left
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::UnsupportedExpression("expression form is not lowered yet")
+    );
+
+    let module = frontend::parse_module(
+        r#"
+        fn leak(x: u32, y: u32) -> u32 {
+          x
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::Core(CoreError::LiveValueAtEnd(linear::ValueId(1)))
     );
 }
