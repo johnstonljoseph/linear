@@ -1,0 +1,15 @@
+[package]
+name = "linear"
+version = "0.1.0"
+edition = "2024"
+description = "Semantic core prototype for the Linear language"
+
+[lib]
+name = "linear"
+path = "src/lib.rs"
+
+[profile.dev]
+debug = 1
+
+[dependencies]
+chumsky = "0.13.0"

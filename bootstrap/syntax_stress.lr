@@ -1,0 +1,209 @@
+// Syntax stress test: Linear source beside roughly equivalent Rust.
+//
+// The Rust snippets are comments so this file remains parseable Linear.
+
+type UserId = u32
+type OrgId = u32
+type Balance = u32
+type Cents = u32
+type UnixTime = u32
+type RequestId = u32
+
+struct Pair<T, U> { first: T, second: U }
+
+enum Option<T> {
+  none,
+  some(T),
+}
+
+struct Money { cents: Cents, currency: u32 }
+
+struct User {
+  id: UserId,
+  org_id: OrgId,
+  balance: Money,
+  flags: { is_admin: Bool, is_locked: Bool, risk_score: u32 },
+}
+
+struct Request {
+  id: RequestId,
+  actor: UserId,
+  at: UnixTime,
+  body: { kind: u32, amount: Money, target: UserId },
+}
+
+enum Decision {
+  allow { reason: u32 },
+  deny { reason: u32 },
+  review { queue: u32, priority: u32 },
+}
+
+enum Event {
+  user_created { id: UserId, initial_balance: Money },
+  balance_adjusted { id: UserId, delta: Money },
+  decision_recorded { request_id: RequestId, decision: Decision },
+}
+
+type Users = HashMap<UserId, User>
+type Events = Vector<Event>
+type Decisions = HashMap<RequestId, Decision>
+
+trait Eq {
+  fn eq(self: Self, other: Self) -> Bool
+}
+
+impl Money {
+  fn add(self, delta: Money) -> Money {
+    Money { cents: self.cents + delta.cents, currency: self.currency }
+  }
+}
+
+impl Eq for Money {
+  fn eq(self, other: Money) -> Bool {
+    self.cents == other.cents
+  }
+}
+
+// Rust shape:
+//
+// type UserId = u32;
+// type OrgId = u32;
+// type Balance = u32;
+// type Cents = u32;
+// type UnixTime = u32;
+// type RequestId = u32;
+//
+// struct Money {
+//     cents: Cents,
+//     currency: u32,
+// }
+//
+// struct User {
+//     id: UserId,
+//     org_id: OrgId,
+//     balance: Money,
+//     flags: UserFlags,
+// }
+//
+// struct UserFlags {
+//     is_admin: bool,
+//     is_locked: bool,
+//     risk_score: u32,
+// }
+//
+// struct RequestBody {
+//     kind: u32,
+//     amount: Money,
+//     target: UserId,
+// }
+//
+// struct Request {
+//     id: RequestId,
+//     actor: UserId,
+//     at: UnixTime,
+//     body: RequestBody,
+// }
+//
+// enum Decision {
+//     Allow { reason: u32 },
+//     Deny { reason: u32 },
+//     Review { queue: u32, priority: u32 },
+// }
+//
+// enum Event {
+//     UserCreated { id: UserId, initial_balance: Money },
+//     BalanceAdjusted { id: UserId, delta: Money },
+//     DecisionRecorded { request_id: RequestId, decision: Decision },
+// }
+
+fn add_event(!events: Events, @event: Event) -> Events {
+  events.push!(@event)
+}
+
+fn decide(request: Request, user: User) -> Decision {
+  if user.flags.is_locked {
+    Decision.deny { reason: 1 }
+  } else if user.flags.risk_score > 80 {
+    Decision.review { queue: 2, priority: user.flags.risk_score }
+  } else if request.body.amount.cents > user.balance.cents {
+    Decision.deny { reason: 3 }
+  } else {
+    Decision.allow { reason: 0 }
+  }
+}
+
+fn apply_decision(!users: Users, request: Request, decision: Decision, !events: Events) -> { users: Users, events: Events } {
+  match decision {
+    .allow { reason }: {
+      let current = users.get(key: request.body.target)
+      let next_balance = current.balance.add(delta: request.body.amount)
+      let next_user = User { id: current.id, org_id: current.org_id, balance: next_balance, flags: current.flags }
+      let users1 = users.insert!(key: current.id, @value: next_user)
+      let event = Event.balance_adjusted { id: current.id, delta: request.body.amount }
+      let events1 = add_event(!events, @event: event)
+      let { users: users2, events: events2 } = { users: users1, events: events1 }
+      { users: users2, events: events2 }
+    },
+    .deny { reason }: {
+      let event = Event.decision_recorded { request_id: request.id, decision: decision }
+      let events1 = add_event(!events, @event: event)
+      { users: users, events: events1 }
+    },
+    .review { queue, priority }: {
+      let event = Event.decision_recorded { request_id: request.id, decision: decision }
+      let events1 = add_event(!events, @event: event)
+      { users: users, events: events1 }
+    },
+  }
+}
+
+// Rust shape:
+//
+// fn decide(request: &Request, user: &User) -> Decision {
+//     if user.flags.is_locked {
+//         Decision::Deny { reason: 1 }
+//     } else if user.flags.risk_score > 80 {
+//         Decision::Review {
+//             queue: 2,
+//             priority: user.flags.risk_score,
+//         }
+//     } else if request.body.amount.cents > user.balance.cents {
+//         Decision::Deny { reason: 3 }
+//     } else {
+//         Decision::Allow { reason: 0 }
+//     }
+// }
+//
+// fn apply_decision(
+//     users: &mut Users,
+//     request: Request,
+//     decision: Decision,
+//     events: &mut Events,
+// ) {
+//     match decision {
+//         Decision::Allow { reason: _ } => {
+//             let current = users.get(&request.body.target).unwrap();
+//             let next_balance = Money {
+//                 cents: current.balance.cents + request.body.amount.cents,
+//                 currency: current.balance.currency,
+//             };
+//             let next_user = User {
+//                 id: current.id,
+//                 org_id: current.org_id,
+//                 balance: next_balance,
+//                 flags: current.flags,
+//             };
+//             users.insert(current.id, next_user);
+//             events.push(Event::BalanceAdjusted {
+//                 id: current.id,
+//                 delta: request.body.amount,
+//             });
+//         }
+//         Decision::Deny { reason: _ } | Decision::Review { .. } => {
+//             events.push(Event::DecisionRecorded {
+//                 request_id: request.id,
+//                 decision,
+//             });
+//         }
+//     }
+// }

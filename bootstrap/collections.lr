@@ -1,0 +1,33 @@
+// Collection and flow-marker sketch.
+
+type UserId = u32
+type Balance = u32
+
+struct User { id: UserId, balance: Balance }
+
+type Users = HashMap<UserId, User>
+type Audit = Vector<Text>
+
+enum UserEvent {
+  created { id: UserId, initial_balance: Balance },
+  updated { id: UserId, delta: Balance },
+}
+
+impl User {
+  fn with_balance(self, balance: Balance) -> User {
+    User { id: self.id, balance: balance }
+  }
+}
+
+fn add_audit(!audit: Audit, @message: Text) -> Audit {
+  audit.push!(@message)
+}
+
+fn update_balance(!users: Users, id: UserId, delta: Balance, !audit: Audit) -> { users: Users, audit: Audit } {
+  let fallback = User { id: id, balance: 0 }
+  let user = users.get_or(key: id, default: fallback)
+  let updated = user.with_balance(balance: user.balance + delta)
+  let users1 = users.insert!(key: id, @value: updated)
+  let audit1 = add_audit(!audit, @message: "balance updated")
+  { users: users1, audit: audit1 }
+}
