@@ -6,8 +6,9 @@ use crate::core::{
     MatchArm as CoreMatchArm, Param as CoreParam, Statement,
 };
 use crate::frontend::{
-    Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item,
-    MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, TypeExpr, ValueFlow,
+    Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, LetStmt,
+    MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, Stmt, TypeExpr,
+    ValueFlow,
 };
 use crate::id::{FunctionId, GlobalId, ValueId};
 use crate::types::{
@@ -106,6 +107,12 @@ pub enum LowerError {
         actual: ValueFlow,
     },
     ExpectedNameForReturnedArgument,
+    DuplicateLinearUse(String),
+    ValueMovedDuringExpression(String),
+    DeadLinearLocal {
+        name: String,
+        ty: TypeId,
+    },
 }
 
 pub fn lower_type_items(module: &Module) -> Result<LoweredTypes, LowerError> {
@@ -167,10 +174,10 @@ struct TypeLowerer {
 impl TypeLowerer {
     fn new_with_standard_types() -> Result<Self, LowerError> {
         let mut types = TypeStore::new();
-        types.add_uint("u8", 8)?;
-        types.add_uint("u16", 16)?;
-        types.add_uint("u32", 32)?;
-        types.add_uint("u64", 64)?;
+        types.add_uint("U8", 8)?;
+        types.add_uint("U16", 16)?;
+        types.add_uint("U32", 32)?;
+        types.add_uint("U64", 64)?;
         types.add_symbol("Symbol")?;
         types.add_text("Text")?;
 
@@ -487,6 +494,18 @@ struct LoweredBinaryOperand {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ThreadedName {
+    name: String,
+    ty: TypeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReturnedCallArg {
+    Rebind(String),
+    Zap,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CallableSignature {
     params: Vec<LoweredParam>,
     visible_output: Option<TypeId>,
@@ -498,6 +517,7 @@ struct BodyLowerer<'a> {
     call_signatures: &'a HashMap<FunctionId, CallableSignature>,
     params: Vec<LoweredParam>,
     env: HashMap<String, LoweredValue>,
+    name_order: Vec<String>,
     body: Vec<Statement>,
     next_value: u32,
 }
@@ -521,44 +541,83 @@ impl<'a> BodyLowerer<'a> {
                 )
             })
             .collect();
+        let name_order = params.iter().map(|param| param.name.clone()).collect();
         Self {
             types,
             program,
             call_signatures,
             params: params.to_vec(),
             env,
+            name_order,
             body: Vec::new(),
             next_value: params.len() as u32,
         }
     }
 
     fn lower_block(
-        mut self,
+        self,
         block: &Block,
         expected_result: Option<TypeId>,
     ) -> Result<(Vec<Statement>, Vec<ValueId>), LowerError> {
-        for let_stmt in &block.lets {
-            let value = self.lower_expr(&let_stmt.value, None)?;
-            if let Some(ty) = &let_stmt.ty {
-                let expected = self.resolve_existing_type(ty)?;
-                if value.ty != expected {
-                    return Err(LowerError::TypeMismatch {
-                        expected,
-                        actual: value.ty,
-                    });
-                }
+        let returned_names = self.function_return_names();
+        self.lower_block_returning(block, expected_result, returned_names)
+    }
+
+    fn lower_block_returning(
+        mut self,
+        block: &Block,
+        expected_result: Option<TypeId>,
+        returned_names: Vec<ThreadedName>,
+    ) -> Result<(Vec<Statement>, Vec<ValueId>), LowerError> {
+        for statement in &block.statements {
+            match statement {
+                Stmt::Let(let_stmt) => self.lower_let_stmt(let_stmt)?,
+                Stmt::Expr(expr) => self.lower_expr_stmt(expr)?,
             }
-            self.bind_pattern(&let_stmt.pattern, value)?;
         }
 
         let explicit_result =
             self.lower_optional_result(block.result.as_deref(), expected_result)?;
-        let mut returns = self.implicit_return_values()?;
+        let mut returns = self.returned_name_values(&returned_names)?;
         if let Some(result) = explicit_result {
             returns.push(result.id);
         }
+        self.zap_dead_names(&returned_names, explicit_result)?;
 
         Ok((self.body, returns))
+    }
+
+    fn lower_let_stmt(&mut self, let_stmt: &LetStmt) -> Result<(), LowerError> {
+        let expected = let_stmt
+            .ty
+            .as_ref()
+            .map(|ty| self.resolve_existing_type(ty))
+            .transpose()?;
+        let moved_name = self.local_name(&let_stmt.value);
+        let value = self.lower_expr(&let_stmt.value, expected)?;
+        if let Some(name) = moved_name {
+            self.env.remove(&name);
+        }
+        if let Some(expected) = expected {
+            if value.ty != expected {
+                return Err(LowerError::TypeMismatch {
+                    expected,
+                    actual: value.ty,
+                });
+            }
+        }
+        self.bind_pattern(&let_stmt.pattern, value)
+    }
+
+    fn lower_expr_stmt(&mut self, expr: &Expr) -> Result<(), LowerError> {
+        let value = self.lower_expr(expr, Some(self.types.unit()))?;
+        if value.ty != self.types.unit() {
+            return Err(LowerError::TypeMismatch {
+                expected: self.types.unit(),
+                actual: value.ty,
+            });
+        }
+        self.push_statement(vec![], CoreExpr::Zap { value: value.id })
     }
 
     fn lower_optional_result(
@@ -593,17 +652,81 @@ impl<'a> BodyLowerer<'a> {
         }
     }
 
-    fn implicit_return_values(&self) -> Result<Vec<ValueId>, LowerError> {
+    fn function_return_names(&self) -> Vec<ThreadedName> {
         self.params
             .iter()
             .filter(|param| param.flow != ValueFlow::NotReturned)
-            .map(|param| {
-                self.env
-                    .get(&param.name)
-                    .map(|value| value.id)
-                    .ok_or_else(|| LowerError::UnknownValue(param.name.clone()))
+            .map(|param| ThreadedName {
+                name: param.name.clone(),
+                ty: param.ty,
             })
             .collect()
+    }
+
+    fn returned_name_values(&self, names: &[ThreadedName]) -> Result<Vec<ValueId>, LowerError> {
+        names
+            .iter()
+            .map(|threaded| {
+                let value = self
+                    .env
+                    .get(&threaded.name)
+                    .ok_or_else(|| LowerError::UnknownValue(threaded.name.clone()))?;
+                if value.ty != threaded.ty {
+                    return Err(LowerError::TypeMismatch {
+                        expected: threaded.ty,
+                        actual: value.ty,
+                    });
+                }
+                Ok(value.id)
+            })
+            .collect()
+    }
+
+    fn live_names_except(&self, excluded: Option<&str>) -> Vec<ThreadedName> {
+        self.name_order
+            .iter()
+            .filter(|name| excluded != Some(name.as_str()))
+            .filter_map(|name| {
+                self.env.get(name).map(|value| ThreadedName {
+                    name: name.clone(),
+                    ty: value.ty,
+                })
+            })
+            .collect()
+    }
+
+    fn zap_dead_names(
+        &mut self,
+        returned_names: &[ThreadedName],
+        explicit_result: Option<LoweredValue>,
+    ) -> Result<(), LowerError> {
+        let protected_result = explicit_result.map(|value| value.id);
+        let live_names = self
+            .name_order
+            .iter()
+            .filter(|name| {
+                !returned_names
+                    .iter()
+                    .any(|returned| returned.name == **name)
+            })
+            .filter_map(|name| {
+                self.env
+                    .get(name)
+                    .copied()
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Vec<_>>();
+
+        for (name, value) in live_names {
+            if Some(value.id) != protected_result {
+                if !self.types.can_zap(value.ty).map_err(LowerError::Type)? {
+                    return Err(LowerError::DeadLinearLocal { name, ty: value.ty });
+                }
+                self.push_statement(vec![], CoreExpr::Zap { value: value.id })?;
+            }
+            self.env.remove(&name);
+        }
+        Ok(())
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: LoweredValue) -> Result<(), LowerError> {
@@ -612,6 +735,7 @@ impl<'a> BodyLowerer<'a> {
                 if self.env.insert(name.clone(), value).is_some() {
                     return Err(LowerError::DuplicateValue(name.clone()));
                 }
+                self.name_order.push(name.clone());
                 Ok(())
             }
             Pattern::Wildcard => self.push_statement(vec![], CoreExpr::Zap { value: value.id }),
@@ -745,6 +869,26 @@ impl<'a> BodyLowerer<'a> {
         Err(LowerError::UnknownValue(name.to_owned()))
     }
 
+    fn local_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Name(name) if self.env.contains_key(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn lower_consumed_expr(
+        &mut self,
+        expr: &Expr,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let name = self.local_name(expr);
+        let value = self.lower_expr(expr, expected)?;
+        if let Some(name) = name {
+            self.env.remove(&name);
+        }
+        Ok(value)
+    }
+
     fn lower_int(
         &mut self,
         value: u128,
@@ -757,8 +901,8 @@ impl<'a> BodyLowerer<'a> {
             }
             None => self
                 .types
-                .type_id("u32")
-                .ok_or_else(|| LowerError::UnknownType("u32".into()))?,
+                .type_id("U32")
+                .ok_or_else(|| LowerError::UnknownType("U32".into()))?,
         };
         let id = self.fresh_value();
         self.push_statement(vec![id], CoreExpr::FiniteLiteral { ty, value })?;
@@ -863,7 +1007,7 @@ impl<'a> BodyLowerer<'a> {
         }
 
         let mut arg_values = Vec::with_capacity(args.len());
-        let mut returned_arg_names = Vec::new();
+        let mut returned_args = Vec::new();
         for ((arg, input), param) in args
             .iter()
             .zip(&core_signature.inputs)
@@ -871,11 +1015,13 @@ impl<'a> BodyLowerer<'a> {
         {
             self.check_arg_flow(arg.flow, param.flow)?;
             let value = if param.flow == ValueFlow::NotReturned {
-                self.lower_expr(&arg.value, Some(input.ty))?
+                self.lower_consumed_expr(&arg.value, Some(input.ty))?
             } else {
-                let (name, value) = self.lower_returned_call_arg(arg)?;
-                self.check_returned_arg_rebind_flow(&name, param.flow)?;
-                returned_arg_names.push(name);
+                let (returned, value) = self.lower_returned_call_arg(arg, input.ty)?;
+                if let ReturnedCallArg::Rebind(name) = &returned {
+                    self.check_returned_arg_rebind_flow(name, param.flow)?;
+                }
+                returned_args.push(returned);
                 value
             };
             if value.ty != input.ty {
@@ -900,14 +1046,21 @@ impl<'a> BodyLowerer<'a> {
             },
         )?;
 
-        let hidden_return_count = returned_arg_names.len();
-        for (name, (id, ty)) in returned_arg_names.into_iter().zip(
+        let hidden_return_count = returned_args.len();
+        for (returned, (id, ty)) in returned_args.into_iter().zip(
             result_ids
                 .iter()
                 .copied()
                 .zip(core_signature.outputs.iter().copied()),
         ) {
-            self.env.insert(name, LoweredValue { id, ty });
+            match returned {
+                ReturnedCallArg::Rebind(name) => {
+                    self.env.insert(name, LoweredValue { id, ty });
+                }
+                ReturnedCallArg::Zap => {
+                    self.push_statement(vec![], CoreExpr::Zap { value: id })?;
+                }
+            }
         }
 
         if let Some(ty) = call_signature.visible_output {
@@ -923,16 +1076,18 @@ impl<'a> BodyLowerer<'a> {
         }
     }
 
-    fn lower_returned_call_arg(&self, arg: &Arg) -> Result<(String, LoweredValue), LowerError> {
-        let Expr::Name(name) = &arg.value else {
-            return Err(LowerError::ExpectedNameForReturnedArgument);
-        };
-        let value = self
-            .env
-            .get(name)
-            .copied()
-            .ok_or_else(|| LowerError::UnknownValue(name.clone()))?;
-        Ok((name.clone(), value))
+    fn lower_returned_call_arg(
+        &mut self,
+        arg: &Arg,
+        expected: TypeId,
+    ) -> Result<(ReturnedCallArg, LoweredValue), LowerError> {
+        if let Expr::Name(name) = &arg.value {
+            if let Some(value) = self.env.get(name).copied() {
+                return Ok((ReturnedCallArg::Rebind(name.clone()), value));
+            }
+        }
+        let value = self.lower_consumed_expr(&arg.value, Some(expected))?;
+        Ok((ReturnedCallArg::Zap, value))
     }
 
     fn check_arg_flow(&self, actual: ValueFlow, expected: ValueFlow) -> Result<(), LowerError> {
@@ -997,7 +1152,7 @@ impl<'a> BodyLowerer<'a> {
                             actual: 1,
                         }));
                     }
-                    vec![self.lower_expr(value, Some(fields[0].ty))?.id]
+                    vec![self.lower_consumed_expr(value, Some(fields[0].ty))?.id]
                 }
             },
             _ => {
@@ -1009,7 +1164,10 @@ impl<'a> BodyLowerer<'a> {
                 }
                 args.iter()
                     .zip(&fields)
-                    .map(|(arg, field)| self.lower_expr(&arg.value, Some(field.ty)).map(|v| v.id))
+                    .map(|(arg, field)| {
+                        self.lower_consumed_expr(&arg.value, Some(field.ty))
+                            .map(|v| v.id)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             }
         };
@@ -1041,7 +1199,7 @@ impl<'a> BodyLowerer<'a> {
             }
             .ok_or_else(|| LowerError::UnknownValue(format!("{constructor}.field{index}")))?;
             values.push(
-                self.lower_expr(&surface_field.value, Some(component.ty))?
+                self.lower_consumed_expr(&surface_field.value, Some(component.ty))?
                     .id,
             );
         }
@@ -1141,7 +1299,7 @@ impl<'a> BodyLowerer<'a> {
                                 actual: 1,
                             }));
                         }
-                        vec![self.lower_expr(value, Some(fields[0].ty))?.id]
+                        vec![self.lower_consumed_expr(value, Some(fields[0].ty))?.id]
                     }
                 },
                 _ => {
@@ -1154,7 +1312,7 @@ impl<'a> BodyLowerer<'a> {
                     args.iter()
                         .zip(&fields)
                         .map(|(arg, field)| {
-                            self.lower_expr(&arg.value, Some(field.ty))
+                            self.lower_consumed_expr(&arg.value, Some(field.ty))
                                 .map(|value| value.id)
                         })
                         .collect::<Result<Vec<_>, _>>()?
@@ -1178,7 +1336,7 @@ impl<'a> BodyLowerer<'a> {
                 actual: args.len(),
             }));
         };
-        self.lower_expr(&arg.value, Some(payload_ty))
+        self.lower_consumed_expr(&arg.value, Some(payload_ty))
     }
 
     fn lower_unit_payload(&mut self) -> Result<LoweredValue, LowerError> {
@@ -1229,6 +1387,11 @@ impl<'a> BodyLowerer<'a> {
         };
         let scrutinee = self.lower_expr(scrutinee, None)?;
         let variants = self.sum_variants(scrutinee.ty)?;
+        let expected = match expected {
+            Some(expected) => Some(expected),
+            None => self.infer_match_result_type(&variants, arms)?,
+        };
+        let threaded_names = self.live_names_except(scrutinee_name.as_deref());
         let payload_id = self.fresh_value();
         let mut core_arms = Vec::with_capacity(arms.len());
 
@@ -1247,7 +1410,8 @@ impl<'a> BodyLowerer<'a> {
                 }
             }
             let arm_block = expr_as_block(&arm.body);
-            let (body, returns) = arm_lowerer.lower_block(&arm_block, expected)?;
+            let (body, returns) =
+                arm_lowerer.lower_block_returning(&arm_block, expected, threaded_names.clone())?;
             core_arms.push(CoreMatchArm::new(variant, payload_id, body, returns));
         }
 
@@ -1255,12 +1419,7 @@ impl<'a> BodyLowerer<'a> {
             self.env.remove(name);
         }
 
-        let result_count = self
-            .params
-            .iter()
-            .filter(|param| param.flow != ValueFlow::NotReturned)
-            .count()
-            + usize::from(expected.is_some());
+        let result_count = threaded_names.len() + usize::from(expected.is_some());
         let result_ids = (0..result_count)
             .map(|_| self.fresh_value())
             .collect::<Vec<_>>();
@@ -1272,14 +1431,14 @@ impl<'a> BodyLowerer<'a> {
             },
         )?;
 
-        for (param, id) in self
-            .params
-            .iter()
-            .filter(|param| param.flow != ValueFlow::NotReturned)
-            .zip(result_ids.iter().copied())
-        {
-            self.env
-                .insert(param.name.clone(), LoweredValue { id, ty: param.ty });
+        for (threaded, id) in threaded_names.iter().zip(result_ids.iter().copied()) {
+            self.env.insert(
+                threaded.name.clone(),
+                LoweredValue {
+                    id,
+                    ty: threaded.ty,
+                },
+            );
         }
 
         if let Some(ty) = expected {
@@ -1306,6 +1465,7 @@ impl<'a> BodyLowerer<'a> {
             call_signatures: self.call_signatures,
             params: self.params.clone(),
             env,
+            name_order: self.name_order.clone(),
             body: Vec::new(),
             next_value: payload_id.0 + 1,
         }
@@ -1320,6 +1480,12 @@ impl<'a> BodyLowerer<'a> {
         let lhs = self.lower_binary_operand(lhs, None)?;
         self.require_finite(lhs.value.ty)?;
         let rhs = self.lower_binary_operand(rhs, Some(lhs.value.ty))?;
+        self.ensure_binary_operand_still_live(&lhs)?;
+        if lhs.name.is_some() && lhs.name == rhs.name {
+            return Err(LowerError::DuplicateLinearUse(
+                lhs.name.expect("checked").clone(),
+            ));
+        }
         if rhs.value.ty != lhs.value.ty {
             return Err(LowerError::TypeMismatch {
                 expected: lhs.value.ty,
@@ -1413,18 +1579,26 @@ impl<'a> BodyLowerer<'a> {
         Ok(LoweredBinaryOperand { name, value })
     }
 
+    fn ensure_binary_operand_still_live(
+        &self,
+        operand: &LoweredBinaryOperand,
+    ) -> Result<(), LowerError> {
+        let Some(name) = &operand.name else {
+            return Ok(());
+        };
+        match self.env.get(name) {
+            Some(current) if current.id == operand.value.id => Ok(()),
+            _ => Err(LowerError::ValueMovedDuringExpression(name.clone())),
+        }
+    }
+
     fn handle_returned_binary_operand(
         &mut self,
         operand: LoweredBinaryOperand,
         returned_id: ValueId,
     ) -> Result<(), LowerError> {
         match operand.name {
-            Some(name)
-                if matches!(
-                    self.param_flow(&name),
-                    Some(flow) if flow != ValueFlow::NotReturned
-                ) =>
-            {
+            Some(name) => {
                 self.env.insert(
                     name,
                     LoweredValue {
@@ -1434,11 +1608,190 @@ impl<'a> BodyLowerer<'a> {
                 );
                 Ok(())
             }
-            Some(name) => {
-                self.env.remove(&name);
-                self.push_statement(vec![], CoreExpr::Zap { value: returned_id })
-            }
             None => self.push_statement(vec![], CoreExpr::Zap { value: returned_id }),
+        }
+    }
+
+    fn infer_match_result_type(
+        &self,
+        variants: &[Component],
+        arms: &[FrontendMatchArm],
+    ) -> Result<Option<TypeId>, LowerError> {
+        let mut inferred = None;
+        for arm in arms {
+            let (_, payload_ty) = find_variant(variants, &arm.variant)
+                .ok_or_else(|| LowerError::UnknownValue(arm.variant.clone()))?;
+            let mut env = self.inference_env();
+            if let Some(pattern) = &arm.payload {
+                self.bind_pattern_type(pattern, payload_ty, &mut env)?;
+            }
+
+            let ty = match self.infer_expr_type_with_env(&arm.body, &env) {
+                Ok(ty) => ty,
+                Err(LowerError::UnknownValue(_)) => continue,
+                Err(err) => return Err(err),
+            };
+            match (inferred, ty) {
+                (None, ty) => inferred = ty,
+                (Some(expected), Some(actual)) if expected == actual => {}
+                (Some(expected), Some(actual)) => {
+                    return Err(LowerError::TypeMismatch { expected, actual });
+                }
+                (Some(expected), None) => {
+                    return Err(LowerError::MissingResult { expected });
+                }
+            }
+        }
+        Ok(inferred)
+    }
+
+    fn inference_env(&self) -> HashMap<String, TypeId> {
+        self.env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.ty))
+            .collect()
+    }
+
+    fn infer_expr_type_with_env(
+        &self,
+        expr: &Expr,
+        env: &HashMap<String, TypeId>,
+    ) -> Result<Option<TypeId>, LowerError> {
+        match expr {
+            Expr::Name(name) => env
+                .get(name)
+                .map(|ty| Some(*ty))
+                .ok_or_else(|| LowerError::UnknownValue(name.clone())),
+            Expr::Int(_) => self
+                .types
+                .type_id("U32")
+                .map(Some)
+                .ok_or_else(|| LowerError::UnknownType("U32".into())),
+            Expr::Unit => Ok(None),
+            Expr::Block(block) => block
+                .result
+                .as_deref()
+                .map(|result| self.infer_expr_type_with_env(result, env))
+                .unwrap_or(Ok(None)),
+            Expr::Binary { lhs, op, .. } => {
+                let lhs_ty = self.infer_expr_type_with_env(lhs, env)?.ok_or_else(|| {
+                    LowerError::TypeMismatch {
+                        expected: self.types.unit(),
+                        actual: self.types.unit(),
+                    }
+                })?;
+                match op {
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                        Ok(Some(lhs_ty))
+                    }
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::Lte
+                    | BinaryOp::Gt
+                    | BinaryOp::Gte => self
+                        .types
+                        .type_id("Bool")
+                        .map(Some)
+                        .ok_or_else(|| LowerError::UnknownType("Bool".into())),
+                }
+            }
+            Expr::Call { callee, .. } => self.infer_call_type(callee),
+            Expr::Match { scrutinee, arms } => {
+                let Some(scrutinee_ty) = self.infer_expr_type_with_env(scrutinee, env)? else {
+                    return Ok(None);
+                };
+                let variants = self.sum_variants(scrutinee_ty)?;
+                self.infer_match_result_type(&variants, arms)
+            }
+            Expr::String(_)
+            | Expr::Product(_)
+            | Expr::FieldAccess { .. }
+            | Expr::MethodCall { .. }
+            | Expr::If { .. } => Ok(None),
+        }
+    }
+
+    fn bind_pattern_type(
+        &self,
+        pattern: &Pattern,
+        ty: TypeId,
+        env: &mut HashMap<String, TypeId>,
+    ) -> Result<(), LowerError> {
+        match pattern {
+            Pattern::Name(name) => {
+                if env.insert(name.clone(), ty).is_some() {
+                    return Err(LowerError::DuplicateValue(name.clone()));
+                }
+                Ok(())
+            }
+            Pattern::Wildcard => Ok(()),
+            Pattern::Unit => {
+                if ty == self.types.unit() {
+                    Ok(())
+                } else {
+                    Err(LowerError::TypeMismatch {
+                        expected: self.types.unit(),
+                        actual: ty,
+                    })
+                }
+            }
+            Pattern::Tuple(patterns) => {
+                let fields = self.product_fields(ty)?;
+                if patterns.len() != fields.len() {
+                    return Err(LowerError::Core(CoreError::ResultArity {
+                        expected: fields.len(),
+                        actual: patterns.len(),
+                    }));
+                }
+                for (pattern, field) in patterns.iter().zip(fields) {
+                    self.bind_pattern_type(pattern, field.ty, env)?;
+                }
+                Ok(())
+            }
+            Pattern::Record(patterns) => {
+                let fields = self.product_fields(ty)?;
+                for field in fields {
+                    let ComponentName::Named(name) = &field.name else {
+                        return Err(LowerError::UnsupportedExpression(
+                            "record patterns require named product fields",
+                        ));
+                    };
+                    let pattern = patterns
+                        .iter()
+                        .find(|pattern| pattern.name.as_deref() == Some(name.as_str()))
+                        .ok_or_else(|| LowerError::UnknownValue(name.clone()))?;
+                    self.bind_pattern_type(&pattern.value, field.ty, env)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn infer_call_type(&self, callee: &Expr) -> Result<Option<TypeId>, LowerError> {
+        match callee {
+            Expr::Name(name) => {
+                if let Some(function) = self.program.function_id(name) {
+                    let signature = self
+                        .call_signatures
+                        .get(&function)
+                        .ok_or_else(|| LowerError::UnknownValue(name.clone()))?;
+                    return Ok(signature.visible_output);
+                }
+                if let Some(ty) = self.types.type_id(name) {
+                    return Ok(Some(ty));
+                }
+                Ok(None)
+            }
+            Expr::FieldAccess { receiver, .. } => {
+                if let Expr::Name(type_name) = receiver.as_ref() {
+                    if let Some(ty) = self.types.type_id(type_name) {
+                        return Ok(Some(ty));
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1632,7 +1985,7 @@ fn expr_as_block(expr: &Expr) -> Block {
     match expr {
         Expr::Block(block) => block.clone(),
         expr => Block {
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Some(Box::new(expr.clone())),
         },
     }

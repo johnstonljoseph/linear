@@ -4,11 +4,11 @@
 // recursive, so this model stores recursive edges as ids into node tables.
 
 type Name = Text
-type TypeNodeId = u32
-type ExprNodeId = u32
-type PatternNodeId = u32
-type ItemId = u32
-type ArmId = u32
+type TypeNodeId = U32
+type ExprNodeId = U32
+type PatternNodeId = U32
+type ItemId = U32
+type ArmId = U32
 
 enum Flow {
   returned_unchanged,
@@ -57,7 +57,7 @@ struct LetStmt { pattern: PatternNodeId, ty: Option<TypeNodeId>, value: ExprNode
 
 enum ExprNode {
   name(Name),
-  int(u32),
+  int(U32),
   string(Text),
   unit,
   block(Block),
@@ -104,7 +104,7 @@ fn flow_is_sunk(flow: Flow) -> Bool {
 }
 
 fn expr_is_leaf(module: AstModule, id: ExprNodeId) -> Bool {
-  let node = module.expr_nodes.get_or(key: id, default: ExprNode.unit)
+  let node = module.expr_nodes.get_or(id, ExprNode.unit)
   match node {
     .name(name_value): true,
     .int(value): true,
@@ -120,6 +120,6 @@ fn expr_is_leaf(module: AstModule, id: ExprNodeId) -> Bool {
   }
 }
 
-fn count_items(module: AstModule) -> u32 {
+fn count_items(module: AstModule) -> U32 {
   module.items.len()
 }

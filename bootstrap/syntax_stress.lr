@@ -2,12 +2,12 @@
 //
 // The Rust snippets are comments so this file remains parseable Linear.
 
-type UserId = u32
-type OrgId = u32
-type Balance = u32
-type Cents = u32
-type UnixTime = u32
-type RequestId = u32
+type UserId = U32
+type OrgId = U32
+type Balance = U32
+type Cents = U32
+type UnixTime = U32
+type RequestId = U32
 
 struct Pair<T, U> { first: T, second: U }
 
@@ -16,26 +16,26 @@ enum Option<T> {
   some(T),
 }
 
-struct Money { cents: Cents, currency: u32 }
+struct Money { cents: Cents, currency: U32 }
 
 struct User {
   id: UserId,
   org_id: OrgId,
   balance: Money,
-  flags: { is_admin: Bool, is_locked: Bool, risk_score: u32 },
+  flags: { is_admin: Bool, is_locked: Bool, risk_score: U32 },
 }
 
 struct Request {
   id: RequestId,
   actor: UserId,
   at: UnixTime,
-  body: { kind: u32, amount: Money, target: UserId },
+  body: { kind: U32, amount: Money, target: UserId },
 }
 
 enum Decision {
-  allow { reason: u32 },
-  deny { reason: u32 },
-  review { queue: u32, priority: u32 },
+  allow { reason: U32 },
+  deny { reason: U32 },
+  review { queue: U32, priority: U32 },
 }
 
 enum Event {
@@ -117,7 +117,7 @@ impl Eq for Money {
 // }
 
 fn add_event(mut events: Events, take event: Event) -> Events {
-  events.push mut(take event)
+  mut events.push(take event)
 }
 
 fn decide(request: Request, user: User) -> Decision {
@@ -135,23 +135,23 @@ fn decide(request: Request, user: User) -> Decision {
 fn apply_decision(mut users: Users, request: Request, decision: Decision, mut events: Events) -> { users: Users, events: Events } {
   match decision {
     .allow { reason }: {
-      let current = users.get(key: request.body.target)
-      let next_balance = current.balance.add(delta: request.body.amount)
+      let current = users.get(request.body.target)
+      let next_balance = current.balance.add(request.body.amount)
       let next_user = User { id: current.id, org_id: current.org_id, balance: next_balance, flags: current.flags }
-      let users1 = users.insert mut(key: current.id, take value: next_user)
+      let users1 = mut users.insert(current.id, take next_user)
       let event = Event.balance_adjusted { id: current.id, delta: request.body.amount }
-      let events1 = add_event(mut events, take event: event)
+      let events1 = add_event(mut events, take event)
       let { users: users2, events: events2 } = { users: users1, events: events1 }
       { users: users2, events: events2 }
     },
     .deny { reason }: {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
-      let events1 = add_event(mut events, take event: event)
+      let events1 = add_event(mut events, take event)
       { users: users, events: events1 }
     },
     .review { queue, priority }: {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
-      let events1 = add_event(mut events, take event: event)
+      let events1 = add_event(mut events, take event)
       { users: users, events: events1 }
     },
   }

@@ -4,7 +4,7 @@ pub mod parse;
 
 pub use ast::{
     Arg, BinaryOp, Block, Expr, Field, FunctionDef, FunctionSig, GlobalDef, ImplBlock, Item,
-    LetStmt, MatchArm, Module, Param, Pattern, TraitDef, TypeDef, TypeExpr, ValueFlow,
+    LetStmt, MatchArm, Module, Param, Pattern, Stmt, TraitDef, TypeDef, TypeExpr, ValueFlow,
 };
 pub use lower::{
     LowerError, LoweredFunction, LoweredGlobal, LoweredMethod, LoweredModule, LoweredParam,

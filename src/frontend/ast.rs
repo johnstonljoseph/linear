@@ -100,8 +100,14 @@ pub struct Field<T> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
-    pub lets: Vec<LetStmt>,
+    pub statements: Vec<Stmt>,
     pub result: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stmt {
+    Let(LetStmt),
+    Expr(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

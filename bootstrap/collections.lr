@@ -1,7 +1,7 @@
 // Collection and flow-marker sketch.
 
-type UserId = u32
-type Balance = u32
+type UserId = U32
+type Balance = U32
 
 struct User { id: UserId, balance: Balance }
 
@@ -20,14 +20,14 @@ impl User {
 }
 
 fn add_audit(mut audit: Audit, take message: Text) -> Audit {
-  audit.push mut(take message)
+  mut audit.push(take message)
 }
 
 fn update_balance(mut users: Users, id: UserId, delta: Balance, mut audit: Audit) -> { users: Users, audit: Audit } {
   let fallback = User { id: id, balance: 0 }
-  let user = users.get_or(key: id, default: fallback)
-  let updated = user.with_balance(balance: user.balance + delta)
-  let users1 = users.insert mut(key: id, take value: updated)
-  let audit1 = add_audit(mut audit, take message: "balance updated")
+  let user = users.get_or(id, fallback)
+  let updated = user.with_balance(user.balance + delta)
+  let users1 = mut users.insert(id, take updated)
+  let audit1 = add_audit(mut audit, take "balance updated")
   { users: users1, audit: audit1 }
 }

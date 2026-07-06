@@ -317,7 +317,7 @@ impl<'a> Evaluator<'a> {
                 Ok(vec![
                     Value::Finite(lhs),
                     Value::Finite(rhs),
-                    Value::Finite((lhs + rhs) % modulus),
+                    Value::Finite(mod_add(lhs, rhs, modulus)),
                 ])
             }
             BuiltinOp::FiniteSub { ty } => {
@@ -326,7 +326,7 @@ impl<'a> Evaluator<'a> {
                 Ok(vec![
                     Value::Finite(lhs),
                     Value::Finite(rhs),
-                    Value::Finite((lhs + modulus - (rhs % modulus)) % modulus),
+                    Value::Finite(mod_sub(lhs, rhs, modulus)),
                 ])
             }
             BuiltinOp::FiniteMul { ty } => {
@@ -335,7 +335,7 @@ impl<'a> Evaluator<'a> {
                 Ok(vec![
                     Value::Finite(lhs),
                     Value::Finite(rhs),
-                    Value::Finite((lhs * rhs) % modulus),
+                    Value::Finite(mod_mul(lhs, rhs, modulus)),
                 ])
             }
             BuiltinOp::FiniteEq { .. } => {
@@ -472,6 +472,46 @@ fn finite_cardinality(types: &TypeStore, id: TypeId) -> Result<u128, EvalError> 
 fn finite_pair(args: Vec<Value>) -> Result<[u128; 2], EvalError> {
     let [lhs, rhs] = expect_array(args)?;
     Ok([expect_finite(lhs)?, expect_finite(rhs)?])
+}
+
+fn mod_add(lhs: u128, rhs: u128, modulus: u128) -> u128 {
+    debug_assert!(modulus > 0);
+    let lhs = lhs % modulus;
+    let rhs = rhs % modulus;
+    let threshold = modulus - rhs;
+    if lhs >= threshold {
+        lhs - threshold
+    } else {
+        lhs + rhs
+    }
+}
+
+fn mod_sub(lhs: u128, rhs: u128, modulus: u128) -> u128 {
+    debug_assert!(modulus > 0);
+    let lhs = lhs % modulus;
+    let rhs = rhs % modulus;
+    if lhs >= rhs {
+        lhs - rhs
+    } else {
+        modulus - (rhs - lhs)
+    }
+}
+
+fn mod_mul(lhs: u128, rhs: u128, modulus: u128) -> u128 {
+    debug_assert!(modulus > 0);
+    let mut lhs = lhs % modulus;
+    let mut rhs = rhs % modulus;
+    let mut result = 0;
+    while rhs != 0 {
+        if rhs & 1 == 1 {
+            result = mod_add(result, lhs, modulus);
+        }
+        rhs >>= 1;
+        if rhs != 0 {
+            lhs = mod_add(lhs, lhs, modulus);
+        }
+    }
+    result
 }
 
 fn expect_array<const N: usize>(args: Vec<Value>) -> Result<[Value; N], EvalError> {

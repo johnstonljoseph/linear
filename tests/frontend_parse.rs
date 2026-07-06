@@ -1,5 +1,5 @@
 use linear::frontend::{
-    Arg, BinaryOp, Block, Expr, Field, Item, LetStmt, MatchArm, Param, Pattern, TypeExpr,
+    Arg, BinaryOp, Block, Expr, Field, Item, LetStmt, MatchArm, Param, Pattern, Stmt, TypeExpr,
     ValueFlow, parse_module,
 };
 
@@ -7,10 +7,10 @@ use linear::frontend::{
 fn parses_type_global_and_function_items() {
     let module = parse_module(
         r#"
-        struct User { id: u32, balance: u32 }
+        struct User { id: U32, balance: U32 }
         global root: User
-        fn add_one(x: u32) -> u32 {
-            let one: u32 = 1
+        fn add_one(x: U32) -> U32 {
+            let one: U32 = 1
             add(x, one)
         }
         "#,
@@ -25,15 +25,15 @@ fn parses_type_global_and_function_items() {
     };
     assert_eq!(function.name, "add_one");
     assert_eq!(function.params.len(), 1);
-    assert_eq!(function.output, TypeExpr::Name("u32".into()));
+    assert_eq!(function.output, TypeExpr::Name("U32".into()));
     assert_eq!(
         function.body,
         Block {
-            lets: vec![LetStmt {
+            statements: vec![Stmt::Let(LetStmt {
                 pattern: Pattern::Name("one".into()),
-                ty: Some(TypeExpr::Name("u32".into())),
+                ty: Some(TypeExpr::Name("U32".into())),
                 value: Expr::Int(1),
-            }],
+            })],
             result: Some(Box::new(Expr::Call {
                 callee: Box::new(Expr::Name("add".into())),
                 args: vec![
@@ -138,14 +138,14 @@ fn parses_braced_struct_and_enum_groups() {
 fn parses_type_capability_clauses() {
     let module = parse_module(
         r#"
-        struct Store { users: List<u32> }: Dup + Zap
+        struct Store { users: List<U32> }: Dup + Zap
 
         enum Flow {
           changed,
           sunk,
         }: Zap
 
-        type Users = HashMap<u32, User>: Dup
+        type Users = HashMap<U32, User>: Dup
         "#,
     )
     .unwrap();
@@ -170,7 +170,7 @@ fn parses_type_capability_clauses() {
 fn parses_optional_arg_labels_and_method_calls() {
     let module = parse_module(
         r#"
-        fn run(users: HashMap<u32, User>, id: u32) -> HashMap<u32, User> {
+        fn run(users: HashMap<U32, User>, id: U32) -> HashMap<U32, User> {
             users.insert(key: id, value: make_user(id))
         }
         "#,
@@ -184,7 +184,7 @@ fn parses_optional_arg_labels_and_method_calls() {
         function.params[0].ty,
         TypeExpr::Apply {
             name: "HashMap".into(),
-            args: vec![TypeExpr::Name("u32".into()), TypeExpr::Name("User".into())],
+            args: vec![TypeExpr::Name("U32".into()), TypeExpr::Name("User".into())],
         }
     );
     assert_eq!(
@@ -221,7 +221,7 @@ fn parses_value_flow_markers_on_method_receivers() {
     let module = parse_module(
         r#"
         fn run(cache: Cache, event: Event) -> Cache {
-            cache.insert mut(key: "latest", take value: event)
+            mut cache.insert(key: "latest", take value: event)
         }
         "#,
     )
@@ -250,6 +250,31 @@ fn parses_value_flow_markers_on_method_receivers() {
             ],
         })
     );
+}
+
+#[test]
+fn rejects_legacy_or_unused_method_receiver_markers() {
+    assert!(
+        parse_module(
+            r#"
+            fn run(cache: Cache, event: Event) -> Cache {
+                cache.insert mut(key: "latest", take value: event)
+            }
+            "#,
+        )
+        .is_err()
+    );
+
+    let errors = parse_module(
+        r#"
+        fn run(cache: Cache) -> Cache {
+            mut cache
+        }
+        "#,
+    )
+    .unwrap_err()
+    .join("\n");
+    assert!(errors.contains("value-flow marker"), "{errors}");
 }
 
 #[test]
@@ -296,17 +321,38 @@ fn parses_value_flow_markers_on_params_and_args() {
 }
 
 #[test]
+fn rejects_reserved_keywords_as_identifiers() {
+    assert!(parse_module("fn let(x: U32) -> U32 { x }").is_err());
+    assert!(parse_module("struct Bad { fn: U32 }").is_err());
+    assert!(parse_module("fn run(take: U32) -> U32 { take }").is_err());
+}
+
+#[test]
+fn rejects_chained_comparisons() {
+    assert!(
+        parse_module(
+            r#"
+            fn between(a: U32, b: U32, c: U32) -> Bool {
+              a < b < c
+            }
+            "#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn parses_impl_methods_with_self_as_first_arg() {
     let module = parse_module(
         r#"
-        struct User { id: u32, balance: u32 }
+        struct User { id: U32, balance: U32 }
 
         impl User {
-            fn balance(self) -> u32 {
+            fn balance(self) -> U32 {
                 self.balance
             }
 
-            fn with_balance(mut self: User, balance: u32) -> User {
+            fn with_balance(mut self: User, balance: U32) -> User {
                 User { id: self.id, balance: balance }
             }
         }
@@ -365,8 +411,8 @@ fn parses_impl_methods_with_self_as_first_arg() {
 fn parses_sum_types_and_match_expressions() {
     let module = parse_module(
         r#"
-        enum MaybeU32 { none, some(u32) }
-        fn or_zero(x: MaybeU32) -> u32 {
+        enum MaybeU32 { none, some(U32) }
+        fn or_zero(x: MaybeU32) -> U32 {
             match x {
                 .none: 0,
                 .some(value): value,
@@ -388,7 +434,7 @@ fn parses_sum_types_and_match_expressions() {
             },
             Field {
                 name: Some("some".into()),
-                value: TypeExpr::Name("u32".into()),
+                value: TypeExpr::Name("U32".into()),
             },
         ])
     );
@@ -421,11 +467,11 @@ fn parses_patterns_in_lets_and_match_payloads() {
     let module = parse_module(
         r#"
         enum Decision {
-          allow { reason: u32 },
-          review { queue: u32, priority: u32 },
+          allow { reason: U32 },
+          review { queue: U32, priority: U32 },
         }
 
-        fn unpack(pair: { left: u32, right: u32 }, decision: Decision) -> u32 {
+        fn unpack(pair: { left: U32, right: U32 }, decision: Decision) -> U32 {
           let { left, right: renamed } = pair
           let (a, b) = (left, renamed)
           match decision {
@@ -440,8 +486,11 @@ fn parses_patterns_in_lets_and_match_payloads() {
     let Item::Function(function) = &module.items[1] else {
         panic!("expected function item");
     };
+    let Stmt::Let(first_let) = &function.body.statements[0] else {
+        panic!("expected first let");
+    };
     assert_eq!(
-        function.body.lets[0].pattern,
+        first_let.pattern,
         Pattern::Record(vec![
             Field {
                 name: Some("left".into()),
@@ -453,8 +502,11 @@ fn parses_patterns_in_lets_and_match_payloads() {
             },
         ])
     );
+    let Stmt::Let(second_let) = &function.body.statements[1] else {
+        panic!("expected second let");
+    };
     assert_eq!(
-        function.body.lets[1].pattern,
+        second_let.pattern,
         Pattern::Tuple(vec![Pattern::Name("a".into()), Pattern::Name("b".into())])
     );
 
@@ -554,7 +606,7 @@ fn parses_if_else_comments_and_binary_ops() {
     let module = parse_module(
         r#"
         // comments are ignored like whitespace
-        fn clamp(x: u32, max: u32) -> u32 {
+        fn clamp(x: U32, max: U32) -> U32 {
             if x > max {
                 max
             } else {
@@ -577,11 +629,11 @@ fn parses_if_else_comments_and_binary_ops() {
                 rhs: Box::new(Expr::Name("max".into())),
             }),
             then_branch: Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Some(Box::new(Expr::Name("max".into()))),
             },
             else_branch: Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Some(Box::new(Expr::Binary {
                     lhs: Box::new(Expr::Name("x".into())),
                     op: BinaryOp::Add,
@@ -596,7 +648,7 @@ fn parses_if_else_comments_and_binary_ops() {
 fn parses_else_if_as_nested_if() {
     let module = parse_module(
         r#"
-        fn classify(x: u32) -> u32 {
+        fn classify(x: U32) -> U32 {
             if x < 10 {
                 0
             } else if x < 20 {
@@ -615,7 +667,7 @@ fn parses_else_if_as_nested_if() {
     let Some(Expr::If { else_branch, .. }) = function.body.result.as_deref() else {
         panic!("expected outer if");
     };
-    assert!(else_branch.lets.is_empty());
+    assert!(else_branch.statements.is_empty());
     assert!(matches!(
         else_branch.result.as_deref(),
         Some(Expr::If { .. })
@@ -628,17 +680,17 @@ fn parses_braced_function_match_and_if_bodies() {
         r#"
         enum MaybeU32 {
           none,
-          some(u32),
+          some(U32),
         }
 
-        fn or_zero(x: MaybeU32) -> u32 {
+        fn or_zero(x: MaybeU32) -> U32 {
           match x {
             .none: 0,
             .some(value): value,
           }
         }
 
-        fn clamp(x: u32, max: u32) -> u32 {
+        fn clamp(x: U32, max: U32) -> U32 {
           if x > max {
             max
           } else {
@@ -669,11 +721,11 @@ fn parses_braced_function_match_and_if_bodies() {
                 rhs: Box::new(Expr::Name("max".into())),
             }),
             then_branch: Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Some(Box::new(Expr::Name("max".into()))),
             },
             else_branch: Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Some(Box::new(Expr::Binary {
                     lhs: Box::new(Expr::Name("x".into())),
                     op: BinaryOp::Add,

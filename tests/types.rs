@@ -7,8 +7,8 @@ use linear::{
 fn store_starts_with_never_and_unit() {
     let store = TypeStore::new();
 
-    assert_eq!(store.type_id("never"), Some(store.never()));
-    assert_eq!(store.type_id("unit"), Some(store.unit()));
+    assert_eq!(store.type_id("Never"), Some(store.never()));
+    assert_eq!(store.type_id("Unit"), Some(store.unit()));
     assert_eq!(store.get(store.never()).unwrap().kind, TypeKind::Never);
     assert_eq!(store.get(store.unit()).unwrap().kind, TypeKind::Unit);
 }
@@ -16,9 +16,9 @@ fn store_starts_with_never_and_unit() {
 #[test]
 fn finite_integer_type_represents_large_finite_sum_compactly() {
     let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let u32_ty = store.add_uint("U32", 32).unwrap();
 
-    assert_eq!(store.type_id("u32"), Some(u32_ty));
+    assert_eq!(store.type_id("U32"), Some(u32_ty));
     assert_eq!(
         store.get(u32_ty).unwrap().kind,
         TypeKind::Finite {
@@ -31,7 +31,7 @@ fn finite_integer_type_represents_large_finite_sum_compactly() {
 #[test]
 fn type_aliases_resolve_to_existing_type_ids() {
     let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let u32_ty = store.add_uint("U32", 32).unwrap();
 
     store.add_alias("UserId", u32_ty).unwrap();
 
@@ -147,7 +147,7 @@ fn composites_cannot_grant_capabilities_beyond_their_structure() {
 #[test]
 fn composite_declared_capabilities_may_confirm_structural_capabilities() {
     let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let u32_ty = store.add_uint("U32", 32).unwrap();
     let pair = store
         .add_product(
             Some("Pair".into()),
@@ -188,7 +188,7 @@ fn function_types_have_dup_and_zap() {
 #[test]
 fn mutable_collection_types_are_linear() {
     let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let u32_ty = store.add_uint("U32", 32).unwrap();
     let list = store
         .add_list(
             Some("MutableListU32".into()),
@@ -214,7 +214,7 @@ fn mutable_collection_types_are_linear() {
 #[test]
 fn immutable_collection_capabilities_are_structural() {
     let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("u32", 32).unwrap();
+    let u32_ty = store.add_uint("U32", 32).unwrap();
     let token = store
         .add_primitive("Token", DeclaredCapabilities::linear())
         .unwrap();
@@ -266,12 +266,12 @@ fn symbol_and_text_types_have_dup_and_zap() {
 fn duplicate_type_names_are_rejected() {
     let mut store = TypeStore::new();
     store
-        .add_finite(Some("u8".into()), 256, DeclaredCapabilities::dup_zap())
+        .add_finite(Some("U8".into()), 256, DeclaredCapabilities::dup_zap())
         .unwrap();
 
     assert_eq!(
-        store.add_uint("u8", 8).unwrap_err(),
-        TypeError::DuplicateName("u8".into())
+        store.add_uint("U8", 8).unwrap_err(),
+        TypeError::DuplicateName("U8".into())
     );
 }
 
@@ -303,7 +303,7 @@ fn invalid_finite_cardinalities_are_rejected() {
         TypeError::ZeroFiniteCardinality
     );
     assert_eq!(
-        store.add_uint("u128", 128).unwrap_err(),
+        store.add_uint("U128", 128).unwrap_err(),
         TypeError::UIntTooWide(128)
     );
 }

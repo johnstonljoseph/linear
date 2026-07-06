@@ -9,11 +9,11 @@ Top-level items are type aliases, structs, enums, globals, functions, impls,
 and traits.
 
 ```linear
-type UserId = u32
+type UserId = U32
 
-struct User { id: UserId, balance: u32 }
-struct MyInt(u32)
-struct CopyStore { users: List<u32> }: Dup + Zap
+struct User { id: UserId, balance: U32 }
+struct MyInt(U32)
+struct CopyStore { users: List<U32> }: Dup + Zap
 
 enum Option<T> {
   none,
@@ -37,14 +37,14 @@ impl Eq for User {
 }
 ```
 
-`struct MyInt(u32)` is valid. `struct MyInt u32` is not. Tuple and record
+`struct MyInt(U32)` is valid. `struct MyInt U32` is not. Tuple and record
 syntax must use parentheses or braces so the grouping is explicit.
 
 `Dup` and `Zap` are written like trait bounds on type declarations:
 
 ```linear
-struct CopyStore { users: List<u32> }: Dup + Zap
-enum DropEvent { item(u32) }: Zap
+struct CopyStore { users: List<U32> }: Dup + Zap
+enum DropEvent { item(U32) }: Zap
 ```
 
 They are trait-like at the surface, but currently compiler-recognized
@@ -52,10 +52,10 @@ capabilities, not ordinary user traits. They change the linearity rules:
 `Dup` permits explicit duplication and `Zap` permits explicit dropping.
 
 Composite declarations may only declare capabilities they already have
-structurally. This is rejected because `MutList<u32>` is linear:
+structurally. This is rejected because `MutList<U32>` is linear:
 
 ```linear
-struct Bad { work: MutList<u32> }: Dup
+struct Bad { work: MutList<U32> }: Dup
 ```
 
 Capability clauses currently lower only on nominal `struct` and `enum`
@@ -71,7 +71,7 @@ type Users = HashMap<UserId, User>: Dup // rejected for now
 Braces are used for named products and blocks:
 
 ```linear
-struct User { id: UserId, balance: u32 }
+struct User { id: UserId, balance: U32 }
 
 {
   let one = 1
@@ -100,7 +100,7 @@ use `->`.
 
 ```linear
 { users: Users, events: Events }
-(u32, Bool)
+(U32, Bool)
 Request -> Decision
 ```
 
@@ -109,9 +109,9 @@ payload, or a named record payload.
 
 ```linear
 enum Decision {
-  allow { reason: u32 },
-  deny { reason: u32 },
-  review { queue: u32, priority: u32 },
+  allow { reason: U32 },
+  deny { reason: U32 },
+  review { queue: U32, priority: U32 },
 }
 ```
 
@@ -128,7 +128,7 @@ Method syntax is sugar for calling a function with `self` as the first
 argument.
 
 ```linear
-users.insert mut(key: id, take value: user)
+mut users.insert(key: id, take value: user)
 ```
 
 Constructors use the type or variant as a callable value.
@@ -181,7 +181,7 @@ The first semantic lowering pass handles non-generic type items:
 - `type` aliases;
 - nominal `struct` products;
 - nominal `enum` sums;
-- builtin finite types `u8`, `u16`, `u32`, and `u64`;
+- builtin finite types `U8`, `U16`, `U32`, and `U64`;
 - builtin `Bool`, `Symbol`, and `Text`;
 - collection families `List`, `Vector`/`Vec`, `MutList`/`MutVector`, `HashMap`,
   and `MutHashMap`.
@@ -238,7 +238,7 @@ operands and return those operands unchanged, followed by the visible result.
 So this:
 
 ```linear
-fn below_ten(x: u32) -> Bool {
+fn below_ten(x: U32) -> Bool {
   x < 10
 }
 ```
@@ -270,15 +270,15 @@ At function definitions and call sites:
 Markers can appear before parameters and before call arguments. Call-site
 markers are optional when the callee signature already determines the flow, but
 they are useful documentation and mismatched explicit markers are rejected. For
-method syntax, a marker between the method name and the argument list marks the
-receiver:
+method syntax, the receiver is the implicit first argument, so a marker before
+the receiver marks `self`:
 
 ```linear
 fn update(mut state: State, config: Config, take event: Event) -> State {
   apply(mut state, config, take event: event)
 }
 
-cache.insert mut(key: "latest", take value: event)
+mut cache.insert(key: "latest", take value: event)
 ```
 
 This is documentation and sugar for value threading. The checker/lowerer must

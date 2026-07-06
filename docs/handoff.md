@@ -93,8 +93,8 @@ to explicit value flow.
 
 The foundational ordinary types are:
 
-- `never`: no values;
-- `unit`: one value.
+- `Never`: no values;
+- `Unit`: one value.
 
 User-defined ordinary types are built from:
 
@@ -110,15 +110,15 @@ Collections are primitive type families instead.
 Compact finite types exist for numbers:
 
 - `Finite<N>` in the model;
-- `u8`, `u16`, `u32`, `u64` in the current scaffold.
+- `U8`, `U16`, `U32`, `U64` in the current scaffold.
 
-`u32` means a finite domain of size `2^32`, not an unbounded natural number.
-Finite types are isomorphic to huge sums of `unit`, but they are represented
+`U32` means a finite domain of size `2^32`, not an unbounded natural number.
+Finite types are isomorphic to huge sums of `Unit`, but they are represented
 compactly and operated on with builtins.
 
 Other built-in type families:
 
-- `Bool`: a two-variant sum over `unit`;
+- `Bool`: a two-variant sum over `Unit`;
 - `Symbol`;
 - `Text`;
 - `List<T>` / `Vector<T>` / `Vec<T>`;
@@ -144,7 +144,7 @@ Important distinction:
 
 Current capability behavior:
 
-- `unit`, `never`, finite types, function types, `Symbol`, and `Text` support
+- `Unit`, `Never`, finite types, function types, `Symbol`, and `Text` support
   both `Dup` and `Zap`.
 - products and sums derive capabilities structurally from components.
 - immutable collections derive capabilities structurally from contents.
@@ -216,7 +216,7 @@ is known.
 Function types remain unary `A -> B`. When a referenced core function has
 multiple inputs or outputs, the first-class function convention packs them:
 
-- zero inputs or outputs are represented as `unit`;
+- zero inputs or outputs are represented as `Unit`;
 - one input or output is represented directly;
 - multiple inputs or outputs are represented by a product with matching field
   order.
@@ -301,20 +301,20 @@ Surface syntax is intentionally still provisional, but the current direction is:
 Examples:
 
 ```linear
-struct User { id: u32, balance: u32 }
-struct MyInt(u32)
+struct User { id: U32, balance: U32 }
+struct MyInt(U32)
 
 enum Decision {
-  allow { reason: u32 },
+  allow { reason: U32 },
   deny,
-  review { queue: u32, priority: u32 },
+  review { queue: U32, priority: U32 },
 }
 
-fn below_ten(x: u32) -> Bool {
+fn below_ten(x: U32) -> Bool {
   x < 10
 }
 
-fn reason(take decision: Decision) -> u32 {
+fn reason(take decision: Decision) -> U32 {
   match decision {
     .allow { reason }: reason,
     .deny: 0,

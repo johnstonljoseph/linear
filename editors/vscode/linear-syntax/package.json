@@ -1,0 +1,36 @@
+{
+  "name": "linear-syntax",
+  "displayName": "Linear Syntax",
+  "description": "Syntax highlighting for the Linear language prototype.",
+  "version": "0.0.1",
+  "publisher": "joseph",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "linear",
+        "aliases": [
+          "Linear",
+          "linear"
+        ],
+        "extensions": [
+          ".lr"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "linear",
+        "scopeName": "source.linear",
+        "path": "./syntaxes/linear.tmLanguage.json"
+      }
+    ]
+  }
+}

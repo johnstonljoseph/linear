@@ -13,20 +13,20 @@ fn lower(src: &str) -> linear::TypeStore {
 fn lowers_type_aliases_structs_and_enums() {
     let types = lower(
         r#"
-        type UserId = u32
-        type Balance = u32
+        type UserId = U32
+        type Balance = U32
 
         struct User { id: UserId, balance: Balance }
 
         enum Decision {
-          allow { reason: u32 },
+          allow { reason: U32 },
           deny,
-          review { queue: u32, priority: u32 },
+          review { queue: U32, priority: U32 },
         }
         "#,
     );
 
-    let u32_ty = types.type_id("u32").unwrap();
+    let u32_ty = types.type_id("U32").unwrap();
     assert_eq!(types.type_id("UserId"), Some(u32_ty));
     assert_eq!(types.type_id("Balance"), Some(u32_ty));
 
@@ -53,13 +53,13 @@ fn lowers_type_aliases_structs_and_enums() {
 fn lowers_tuple_structs_and_anonymous_products() {
     let types = lower(
         r#"
-        struct MyInt(u32)
-        type Pair = (u32, u32)
+        struct MyInt(U32)
+        type Pair = (U32, U32)
         struct UsesPair { left: Pair, right: Pair }
         "#,
     );
 
-    let u32_ty = types.type_id("u32").unwrap();
+    let u32_ty = types.type_id("U32").unwrap();
     let my_int = types.type_id("MyInt").unwrap();
     assert_eq!(
         types.get(my_int).unwrap().kind,
@@ -81,8 +81,8 @@ fn lowers_tuple_structs_and_anonymous_products() {
 fn lowers_builtin_collection_types_and_interns_repeated_shapes() {
     let types = lower(
         r#"
-        type UserId = u32
-        struct User { id: UserId, balance: u32 }
+        type UserId = U32
+        struct User { id: UserId, balance: U32 }
         struct Store {
           active: HashMap<UserId, User>,
           pending: HashMap<UserId, User>,
@@ -143,7 +143,7 @@ fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
         frontend::LowerError::UnknownType("Missing".into())
     );
 
-    let module = frontend::parse_module("struct Bad { xs: List<u32, u32> }").unwrap();
+    let module = frontend::parse_module("struct Bad { xs: List<U32, U32> }").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::BadGenericArity {
@@ -159,19 +159,19 @@ fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
         frontend::LowerError::UnsupportedGenericDecl { name: "Box".into() }
     );
 
-    let module = frontend::parse_module("type u32 = u16").unwrap();
+    let module = frontend::parse_module("type U32 = U16").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
-        frontend::LowerError::Type(TypeError::DuplicateName("u32".into()))
+        frontend::LowerError::Type(TypeError::DuplicateName("U32".into()))
     );
 
-    let module = frontend::parse_module("struct Bad { value: u32 }: Eq").unwrap();
+    let module = frontend::parse_module("struct Bad { value: U32 }: Eq").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::UnknownCapability("Eq".into())
     );
 
-    let module = frontend::parse_module("type Alias = u32: Dup").unwrap();
+    let module = frontend::parse_module("type Alias = U32: Dup").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::UnsupportedAliasCapabilities {
@@ -182,7 +182,7 @@ fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
 
 #[test]
 fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
-    let module = frontend::parse_module("struct Bad { work: MutList<u32> }: Dup").unwrap();
+    let module = frontend::parse_module("struct Bad { work: MutList<U32> }: Dup").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::Type(TypeError::DeclaredCapabilityExceedsStructural {
@@ -197,7 +197,7 @@ fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
     let module = frontend::parse_module(
         r#"
         enum Bad {
-          item(MutList<u32>),
+          item(MutList<U32>),
         }: Zap
         "#,
     )
@@ -218,11 +218,11 @@ fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
 fn lowers_global_and_function_signatures() {
     let module = frontend::parse_module(
         r#"
-        type UserId = u32
-        struct User { id: UserId, balance: u32 }
+        type UserId = U32
+        struct User { id: UserId, balance: U32 }
         global root: User
 
-        fn decide(mut user: User, config: u32, take event: UserId) -> Bool {
+        fn decide(mut user: User, config: U32, take event: UserId) -> Bool {
           true
         }
         "#,
@@ -232,7 +232,7 @@ fn lowers_global_and_function_signatures() {
     let lowered = frontend::lower_module_signatures(&module).unwrap();
     let user = lowered.types.type_id("User").unwrap();
     let bool_ty = lowered.types.type_id("Bool").unwrap();
-    let u32_ty = lowered.types.type_id("u32").unwrap();
+    let u32_ty = lowered.types.type_id("U32").unwrap();
 
     assert_eq!(lowered.globals.len(), 1);
     assert_eq!(lowered.globals[0].name, "root");
@@ -269,14 +269,14 @@ fn lowers_global_and_function_signatures() {
 fn lowers_impl_method_signatures_with_expanded_self() {
     let module = frontend::parse_module(
         r#"
-        struct User { id: u32, balance: u32 }
+        struct User { id: U32, balance: U32 }
 
         impl User {
-          fn balance(self) -> u32 {
+          fn balance(self) -> U32 {
             self.balance
           }
 
-          fn with_balance(mut self, take balance: u32) -> () {
+          fn with_balance(mut self, take balance: U32) -> () {
             ()
           }
         }
@@ -286,7 +286,7 @@ fn lowers_impl_method_signatures_with_expanded_self() {
 
     let lowered = frontend::lower_module_signatures(&module).unwrap();
     let user = lowered.types.type_id("User").unwrap();
-    let u32_ty = lowered.types.type_id("u32").unwrap();
+    let u32_ty = lowered.types.type_id("U32").unwrap();
 
     assert!(lowered.functions.is_empty());
     assert_eq!(lowered.methods.len(), 2);
@@ -320,7 +320,7 @@ fn lowers_impl_method_signatures_with_expanded_self() {
 fn lowers_trait_impl_method_names_without_lowering_trait_semantics() {
     let module = frontend::parse_module(
         r#"
-        struct User { id: u32 }
+        struct User { id: U32 }
 
         trait Eq {
           fn eq(self: User, other: User) -> Bool
@@ -355,8 +355,8 @@ fn lowers_trait_impl_method_names_without_lowering_trait_semantics() {
 fn signature_lowering_rejects_duplicate_names_and_generic_functions() {
     let module = frontend::parse_module(
         r#"
-        global root: u32
-        fn root(x: u32) -> u32 { x }
+        global root: U32
+        fn root(x: U32) -> U32 { x }
         "#,
     )
     .unwrap();
@@ -376,11 +376,11 @@ fn signature_lowering_rejects_duplicate_names_and_generic_functions() {
 fn lowers_and_runs_simple_arithmetic_bodies() {
     let module = frontend::parse_module(
         r#"
-        fn add(take x: u32, take y: u32) -> u32 {
+        fn add(take x: U32, take y: U32) -> U32 {
           x + y
         }
 
-        fn add_one(take x: u32) -> u32 {
+        fn add_one(take x: U32) -> U32 {
           add(take x, 1)
         }
         "#,
@@ -400,7 +400,7 @@ fn lowers_and_runs_simple_arithmetic_bodies() {
 fn infix_ops_thread_returned_unchanged_params_without_dup() {
     let module = frontend::parse_module(
         r#"
-        fn below_ten(x: u32) -> Bool {
+        fn below_ten(x: U32) -> Bool {
           x < 10
         }
         "#,
@@ -426,10 +426,71 @@ fn infix_ops_thread_returned_unchanged_params_without_dup() {
 }
 
 #[test]
+fn infix_ops_rebind_returned_local_operands() {
+    let module = frontend::parse_module(
+        r#"
+        fn two_reads(take x: U32) -> U32 {
+          let y = x
+          let a = y + 1
+          let b = y + 2
+          b
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("two_reads").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(10)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(12)]);
+}
+
+#[test]
+fn infix_ops_report_duplicate_linear_operands() {
+    let module = frontend::parse_module(
+        r#"
+        fn double(take x: U32) -> U32 {
+          x + x
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::DuplicateLinearUse("x".into())
+    );
+}
+
+#[test]
+fn infix_ops_report_names_moved_inside_rhs() {
+    let module = frontend::parse_module(
+        r#"
+        fn bump(take x: U32) -> U32 {
+          x + 1
+        }
+
+        fn bad(take x: U32) -> U32 {
+          x + bump(take x)
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        frontend::lower_module_bodies(&module).unwrap_err(),
+        frontend::LowerError::ValueMovedDuringExpression("x".into())
+    );
+}
+
+#[test]
 fn body_lowering_does_not_auto_dup_visible_returns() {
     let module = frontend::parse_module(
         r#"
-        fn copy_return(x: u32) -> u32 {
+        fn copy_return(x: U32) -> U32 {
           x
         }
         "#,
@@ -446,11 +507,11 @@ fn body_lowering_does_not_auto_dup_visible_returns() {
 fn calls_rebind_hidden_returned_arguments() {
     let module = frontend::parse_module(
         r#"
-        fn pass(mut state: u32, config: u32, take event: u32) -> u32 {
+        fn pass(mut state: U32, config: U32, take event: U32) -> U32 {
           event
         }
 
-        fn caller(mut state: u32, config: u32, take event: u32) -> u32 {
+        fn caller(mut state: U32, config: U32, take event: U32) -> U32 {
           pass(mut state, config, take event)
         }
         "#,
@@ -473,14 +534,67 @@ fn calls_rebind_hidden_returned_arguments() {
 }
 
 #[test]
-fn body_lowering_rejects_mutating_an_unchanged_threaded_param() {
+fn bare_call_statements_are_separated_by_newlines() {
     let module = frontend::parse_module(
         r#"
-        fn touch(mut x: u32) -> () {
+        fn touch(x: U32) -> () {
           ()
         }
 
-        fn bad(x: u32) -> () {
+        fn caller(x: U32) -> U32 {
+          touch(x)
+          x + 1
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("caller").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(10)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(10), Value::Finite(11)]);
+}
+
+#[test]
+fn calls_auto_zap_hidden_returns_for_temporary_arguments() {
+    let module = frontend::parse_module(
+        r#"
+        fn make(take x: U32) -> U32 {
+          x + 1
+        }
+
+        fn observe(x: U32) -> U32 {
+          x + 1
+        }
+
+        fn caller(take x: U32) -> U32 {
+          observe(make(take x))
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("caller").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(40)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(42)]);
+}
+
+#[test]
+fn body_lowering_rejects_mutating_an_unchanged_threaded_param() {
+    let module = frontend::parse_module(
+        r#"
+        fn touch(mut x: U32) -> () {
+          ()
+        }
+
+        fn bad(x: U32) -> () {
           touch(x)
         }
         "#,
@@ -500,10 +614,10 @@ fn body_lowering_rejects_mutating_an_unchanged_threaded_param() {
 fn lowers_let_bindings_globals_and_comparisons() {
     let module = frontend::parse_module(
         r#"
-        global root: u32
+        global root: U32
 
-        fn below_root(x: u32) -> Bool {
-          let limit: u32 = root
+        fn below_root(x: U32) -> Bool {
+          let limit: U32 = root
           x < limit
         }
         "#,
@@ -518,7 +632,7 @@ fn lowers_let_bindings_globals_and_comparisons() {
     assert_eq!(
         core_function.outputs,
         vec![
-            lowered.types.type_id("u32").unwrap(),
+            lowered.types.type_id("U32").unwrap(),
             lowered.types.type_id("Bool").unwrap(),
         ]
     );
@@ -529,9 +643,9 @@ fn lowers_let_bindings_globals_and_comparisons() {
 fn lowers_product_constructor_bodies() {
     let module = frontend::parse_module(
         r#"
-        struct Pair { left: u32, right: u32 }
+        struct Pair { left: U32, right: U32 }
 
-        fn make_pair(take left: u32, take right: u32) -> Pair {
+        fn make_pair(take left: U32, take right: U32) -> Pair {
           Pair { left: left, right: right }
         }
         "#,
@@ -554,13 +668,13 @@ fn lowers_product_constructor_bodies() {
 fn lowers_enum_constructors() {
     let module = frontend::parse_module(
         r#"
-        enum MaybeU32 { none, some(u32) }
+        enum MaybeU32 { none, some(U32) }
 
         fn make_none() -> MaybeU32 {
           MaybeU32.none
         }
 
-        fn make_some(take value: u32) -> MaybeU32 {
+        fn make_some(take value: U32) -> MaybeU32 {
           MaybeU32.some(value)
         }
         "#,
@@ -595,11 +709,11 @@ fn lowers_match_with_record_payload_patterns() {
     let module = frontend::parse_module(
         r#"
         enum Decision {
-          allow { reason: u32 },
+          allow { reason: U32 },
           deny,
         }
 
-        fn reason(take decision: Decision) -> u32 {
+        fn reason(take decision: Decision) -> U32 {
           match decision {
             .allow { reason }: reason,
             .deny: 0,
@@ -626,9 +740,9 @@ fn lowers_match_with_record_payload_patterns() {
 fn match_branches_thread_unchanged_params() {
     let module = frontend::parse_module(
         r#"
-        enum MaybeU32 { none, some(u32) }
+        enum MaybeU32 { none, some(U32) }
 
-        fn score(config: u32, take value: MaybeU32) -> u32 {
+        fn score(config: U32, take value: MaybeU32) -> U32 {
           match value {
             .none: config + 1,
             .some(x): x + config,
@@ -657,12 +771,109 @@ fn match_branches_thread_unchanged_params() {
 }
 
 #[test]
+fn match_branches_thread_live_locals() {
+    let module = frontend::parse_module(
+        r#"
+        enum MaybeU32 { none, some(U32) }
+
+        fn after_match(take value: MaybeU32) -> U32 {
+          let y = 5
+          let z = match value {
+            .none: 1,
+            .some(x): x + 2,
+          }
+          y + z
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("after_match").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(
+            function,
+            vec![Value::Sum {
+                variant: 1,
+                payload: Box::new(Value::Finite(10)),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(17)]);
+}
+
+#[test]
+fn match_expression_synthesizes_visible_result_type() {
+    let module = frontend::parse_module(
+        r#"
+        enum MaybeU32 { none, some(U32) }
+
+        fn score(take value: MaybeU32) -> U32 {
+          let z = match value {
+            .none: 1,
+            .some(x): x + 2,
+          }
+          z
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("score").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(
+            function,
+            vec![Value::Sum {
+                variant: 0,
+                payload: Box::new(Value::Unit),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(1)]);
+}
+
+#[test]
+fn match_expression_synthesizes_payload_derived_result_type() {
+    let module = frontend::parse_module(
+        r#"
+        enum EitherU32 { left(U32), right(U32) }
+
+        fn pick(take value: EitherU32) -> U32 {
+          let z = match value {
+            .left(v): v,
+            .right(w): w,
+          }
+          z
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("pick").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(
+            function,
+            vec![Value::Sum {
+                variant: 1,
+                payload: Box::new(Value::Finite(42)),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(42)]);
+}
+
+#[test]
 fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
     let module = frontend::parse_module(
         r#"
-        struct Pair { left: u32, right: u32 }
+        struct Pair { left: U32, right: U32 }
 
-        fn bad(pair: Pair) -> u32 {
+        fn bad(pair: Pair) -> U32 {
           pair.left
         }
         "#,
@@ -676,15 +887,34 @@ fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
 
     let module = frontend::parse_module(
         r#"
-        fn leak(take x: u32, take y: u32) -> u32 {
+        fn leak(take x: MutList<U32>, take y: MutList<U32>) -> MutList<U32> {
           x
         }
         "#,
     )
     .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         frontend::lower_module_bodies(&module).unwrap_err(),
-        frontend::LowerError::Core(CoreError::LiveValueAtEnd(linear::ValueId(1)))
+        frontend::LowerError::DeadLinearLocal { name, .. } if name == "y"
+    ));
+}
+
+#[test]
+fn body_lowering_reports_dead_linear_local_by_name() {
+    let module = frontend::parse_module(
+        r#"
+        fn leak_local(take start: MutList<U32>) -> () {
+          let h = start
+          ()
+        }
+        "#,
+    )
+    .unwrap();
+
+    let err = frontend::lower_module_bodies(&module).unwrap_err();
+    assert!(
+        matches!(&err, frontend::LowerError::DeadLinearLocal { name, .. } if name == "h"),
+        "{err:?}"
     );
 }

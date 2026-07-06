@@ -20,8 +20,8 @@ future frontends and sugars lower into.
 
 The initial ordinary types are:
 
-- `never`: no values.
-- `unit`: one value.
+- `Never`: no values.
+- `Unit`: one value.
 
 All ordinary user types are built from prior types using:
 
@@ -32,9 +32,9 @@ All ordinary user types are built from prior types using:
 The core also has compact finite-domain types:
 
 - `Finite<N>`: a type with exactly `N` values, isomorphic to a sum of `N`
-  `unit` variants.
+  `Unit` variants.
 
-These are used for numbers. For example, `u32` is `Finite<2^32>`. The compiler
+These are used for numbers. For example, `U32` is `Finite<2^32>`. The compiler
 does not expand these types into enormous sums; arithmetic and comparison
 operations over them are built-ins.
 
@@ -44,7 +44,7 @@ it receives its positional index as its name.
 Examples:
 
 ```text
-Bool = unit + unit
+Bool = Unit + Unit
   variants: false, true
 
 User = UserId * Balance * Locked
@@ -55,14 +55,14 @@ Recursive types are not allowed. A type definition may only reference types
 already defined. This excludes ordinary inductive encodings such as:
 
 ```text
-List<T> = unit + (T * List<T>)
+List<T> = Unit + (T * List<T>)
 ```
 
 Collections are therefore primitive types, described separately below.
 
 The current Rust scaffold also has primitive `Symbol`, `Text`, ordered
 `List<T>`/`Vector<T>`, `HashMap<K, V>`, and named opaque primitive types.
-`Symbol`, `Text`, finite types, function types, `unit`, and `never` support
+`Symbol`, `Text`, finite types, function types, `Unit`, and `Never` support
 explicit `Dup` and `Zap`. Collections come in two kinds:
 
 - immutable collections, whose `Dup`/`Zap` capabilities are derived
@@ -72,7 +72,7 @@ explicit `Dup` and `Zap`. Collections come in two kinds:
 Function types are inhabited only by global function identifiers. Function types
 are unary `A -> B`; multi-input or multi-output core functions are represented
 as first-class values by packing their inputs and outputs into products. Zero
-inputs or outputs pack as `unit`, one input or output is used directly, and
+inputs or outputs pack as `Unit`, one input or output is used directly, and
 multiple inputs or outputs pack into a product in declaration order.
 
 The language does not construct new runtime functions with lambdas, currying,
@@ -81,7 +81,7 @@ Closure syntax is surface sugar over product values and global apply functions.
 
 ## Values
 
-The only primitive ordinary value is the value of `unit`.
+The only primitive ordinary value is the value of `Unit`.
 
 Other values are built by:
 
@@ -103,7 +103,7 @@ global root : Root
 A global definition additionally gives an initialized value body. The current
 Rust scaffold supports literal global expression trees:
 
-- `unit`;
+- `Unit`;
 - finite literals;
 - symbol and text literals;
 - static function identifiers;
@@ -134,11 +134,11 @@ Two special traits control structural rules:
 
 ```text
 Dup<T> : dup : T -> T * T
-Zap<T> : zap : T -> unit
+Zap<T> : zap : T -> Unit
 ```
 
 `Dup` permits explicit duplication. `Zap` permits explicit dropping.
-In the Rust scaffold, `unit` is represented as zero core values for this
+In the Rust scaffold, `Unit` is represented as zero core values for this
 purpose, so a `Zap` expression consumes its input and binds no result ids.
 
 Types with both traits behave like ordinary copyable/dropable values, but the
@@ -387,7 +387,7 @@ The evaluator currently supports:
 - lists/vectors and hashmaps.
 
 Finite arithmetic is modular over the finite type cardinality. Boolean visible
-results are represented as a two-variant sum over `unit`, with variant `0` as
+results are represented as a two-variant sum over `Unit`, with variant `0` as
 false and variant `1` as true.
 
 ## Iteration And Intent
@@ -420,7 +420,7 @@ Building primitive collections requires primitive construction APIs. The
 preferred model is a linear builder:
 
 ```text
-new_builder : unit -> Builder<C>
+new_builder : Unit -> Builder<C>
 yield       : Builder<C> * Item -> Builder<C>
 finish      : Builder<C> -> C
 ```

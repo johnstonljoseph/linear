@@ -1,0 +1,3 @@
+*.vsix
+.gitignore
+.DS_Store

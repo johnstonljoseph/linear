@@ -19,11 +19,11 @@ impl TypeStore {
             unit: TypeId(0),
         };
         store.never = store
-            .add_named_builtin("never", TypeKind::Never, DeclaredCapabilities::dup_zap())
-            .expect("fresh store should accept never");
+            .add_named_builtin("Never", TypeKind::Never, DeclaredCapabilities::dup_zap())
+            .expect("fresh store should accept Never");
         store.unit = store
-            .add_named_builtin("unit", TypeKind::Unit, DeclaredCapabilities::dup_zap())
-            .expect("fresh store should accept unit");
+            .add_named_builtin("Unit", TypeKind::Unit, DeclaredCapabilities::dup_zap())
+            .expect("fresh store should accept Unit");
         store
     }
 

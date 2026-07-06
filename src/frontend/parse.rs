@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 
 use super::ast::{
     Arg, BinaryOp, Block, Expr, Field, FunctionDef, FunctionSig, GlobalDef, ImplBlock, Item,
-    LetStmt, MatchArm, Module, Param, Pattern, TraitDef, TypeDef, TypeExpr, ValueFlow,
+    LetStmt, MatchArm, Module, Param, Pattern, Stmt, TraitDef, TypeDef, TypeExpr, ValueFlow,
 };
 
 pub type ParseErrors = Vec<String>;
@@ -32,9 +32,9 @@ pub fn parse_module(src: &str) -> Result<Module, ParseErrors> {
 
 fn module_parser<'src>()
 -> impl Parser<'src, &'src str, Module, extra::Err<Rich<'src, char>>> + Clone {
-    padding()
+    layout()
         .ignore_then(item_parser().repeated().collect::<Vec<_>>())
-        .then_ignore(padding())
+        .then_ignore(layout())
         .then_ignore(end())
         .map(|items| Module { items })
         .boxed()
@@ -283,7 +283,7 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         impl_def,
         trait_def,
     ))
-    .padded()
+    .padded_by(layout())
     .boxed()
 }
 
@@ -291,10 +291,21 @@ fn expr_to_block(expr: Expr) -> Block {
     match expr {
         Expr::Block(block) => block,
         expr => Block {
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Some(Box::new(expr)),
         },
     }
+}
+
+fn block_from_statements(mut statements: Vec<Stmt>) -> Block {
+    let result = match statements.last() {
+        Some(Stmt::Expr(_)) => match statements.pop().expect("last statement checked") {
+            Stmt::Expr(expr) => Some(Box::new(expr)),
+            Stmt::Let(_) => unreachable!("last statement checked"),
+        },
+        _ => None,
+    };
+    Block { statements, result }
 }
 
 fn lower_method(target: TypeExpr, method: RawMethodDef) -> Result<FunctionDef, String> {
@@ -433,7 +444,7 @@ fn type_parser<'src>()
                 None => input,
             })
     })
-    .padded()
+    .padded_by(layout())
     .boxed()
 }
 
@@ -522,7 +533,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
 
         let int = text::int(10)
             .map(|digits: &str| Expr::Int(digits.parse().expect("valid integer literal")))
-            .padded();
+            .padded_by(padding());
 
         let string = none_of('"')
             .repeated()
@@ -546,7 +557,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .separated_by(sym(','))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('('), sym(')'))
+            .delimited_by(inline_sym('('), close_sym(')'))
             .boxed();
 
         let let_stmt = keyword("let")
@@ -556,15 +567,14 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .then(expr.clone())
             .map(|((pattern, ty), value)| LetStmt { pattern, ty, value });
 
-        let block_raw = let_stmt
-            .repeated()
+        let block_stmt = let_stmt.map(Stmt::Let).or(expr.clone().map(Stmt::Expr));
+
+        let block_raw = block_stmt
+            .separated_by(line_separator())
+            .allow_trailing()
             .collect::<Vec<_>>()
-            .then(expr.clone().or_not())
-            .delimited_by(sym('{'), sym('}'))
-            .map(|(lets, result)| Block {
-                lets,
-                result: result.map(Box::new),
-            })
+            .delimited_by(sym('{'), close_sym('}'))
+            .map(block_from_statements)
             .boxed();
         let block = block_raw.clone().map(Expr::Block);
 
@@ -583,7 +593,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .separated_by(sym(','))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('{'), sym('}'))
+            .delimited_by(sym('{'), close_sym('}'))
             .map(Expr::Product)
             .boxed();
 
@@ -592,7 +602,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .separated_by(sym(','))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('('), sym(')'))
+            .delimited_by(sym('('), close_sym(')'))
             .map(tuple_or_group_expr)
             .boxed();
 
@@ -639,7 +649,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
                     .separated_by(sym(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
-                    .delimited_by(sym('{'), sym('}')),
+                    .delimited_by(sym('{'), close_sym('}')),
             )
             .map(|(scrutinee, arms)| Expr::Match {
                 scrutinee: Box::new(scrutinee),
@@ -648,7 +658,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
 
         let if_expr = recursive(|if_expr| {
             let else_branch = block_raw.clone().or(if_expr.map(|else_if| Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Some(Box::new(else_if)),
             }));
 
@@ -675,7 +685,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             ident.map(Expr::Name),
             paren_expr,
         ))
-        .padded()
+        .padded_by(padding())
         .boxed();
 
         #[derive(Clone, Debug)]
@@ -683,11 +693,13 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             Call(Vec<Arg>),
             Record(Vec<Field<Expr>>),
             Field(String),
-            Method {
-                name: String,
-                receiver_flow: ValueFlow,
-                args: Vec<Arg>,
-            },
+            Method { name: String, args: Vec<Arg> },
+        }
+
+        #[derive(Clone, Debug)]
+        struct ChainExpr {
+            expr: Expr,
+            receiver_flow: ValueFlow,
         }
 
         let call = args.clone().map(Postfix::Call).boxed();
@@ -698,51 +710,73 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             })
             .map(Postfix::Record)
             .boxed();
-        let method = sym('.')
+        let method = inline_sym('.')
             .ignore_then(ident_parser())
-            .then(flow_marker().then(args).or_not())
-            .map(|(name, call)| match call {
-                Some((receiver_flow, args)) => Postfix::Method {
-                    name,
-                    receiver_flow,
-                    args,
-                },
+            .then(args.clone().or_not())
+            .map(|(name, args)| match args {
+                Some(args) => Postfix::Method { name, args },
                 None => Postfix::Field(name),
             })
             .boxed();
 
-        let call_chain = atom
+        let chain_start = flow_keyword()
+            .or_not()
+            .then(atom)
+            .map(|(receiver_flow, expr)| ChainExpr {
+                expr,
+                receiver_flow: receiver_flow.unwrap_or(ValueFlow::ReturnedUnchanged),
+            });
+
+        let call_chain = chain_start
             .foldl(
                 choice((method, call, record_construct)).repeated(),
                 |callee, postfix| match postfix {
-                    Postfix::Call(args) => Expr::Call {
-                        callee: Box::new(callee),
-                        args,
+                    Postfix::Call(args) => ChainExpr {
+                        expr: Expr::Call {
+                            callee: Box::new(callee.expr),
+                            args,
+                        },
+                        receiver_flow: callee.receiver_flow,
                     },
-                    Postfix::Record(fields) => Expr::Call {
-                        callee: Box::new(callee),
-                        args: vec![Arg {
-                            flow: ValueFlow::ReturnedUnchanged,
-                            label: None,
-                            value: Expr::Product(fields),
-                        }],
+                    Postfix::Record(fields) => ChainExpr {
+                        expr: Expr::Call {
+                            callee: Box::new(callee.expr),
+                            args: vec![Arg {
+                                flow: ValueFlow::ReturnedUnchanged,
+                                label: None,
+                                value: Expr::Product(fields),
+                            }],
+                        },
+                        receiver_flow: callee.receiver_flow,
                     },
-                    Postfix::Field(field) => Expr::FieldAccess {
-                        receiver: Box::new(callee),
-                        field,
+                    Postfix::Field(field) => ChainExpr {
+                        expr: Expr::FieldAccess {
+                            receiver: Box::new(callee.expr),
+                            field,
+                        },
+                        receiver_flow: callee.receiver_flow,
                     },
-                    Postfix::Method {
-                        name,
-                        receiver_flow,
-                        args,
-                    } => Expr::MethodCall {
-                        receiver: Box::new(callee),
-                        receiver_flow,
-                        method: name,
-                        args,
+                    Postfix::Method { name, args } => ChainExpr {
+                        expr: Expr::MethodCall {
+                            receiver: Box::new(callee.expr),
+                            receiver_flow: callee.receiver_flow,
+                            method: name,
+                            args,
+                        },
+                        receiver_flow: ValueFlow::ReturnedUnchanged,
                     },
                 },
             )
+            .try_map(|callee, span| {
+                if callee.receiver_flow != ValueFlow::ReturnedUnchanged {
+                    Err(Rich::custom(
+                        span,
+                        "`mut` and `take` receiver markers must be used before a method call",
+                    ))
+                } else {
+                    Ok(callee.expr)
+                }
+            })
             .boxed();
 
         let product = call_chain
@@ -773,23 +807,27 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             )
             .boxed();
 
-        sum.clone().foldl(
-            choice((
-                op("==").to(BinaryOp::Eq),
-                op("!=").to(BinaryOp::NotEq),
-                op("<=").to(BinaryOp::Lte),
-                op(">=").to(BinaryOp::Gte),
-                op("<").to(BinaryOp::Lt),
-                op(">").to(BinaryOp::Gt),
-            ))
-            .then(sum)
-            .repeated(),
-            |lhs, (op, rhs)| Expr::Binary {
-                lhs: Box::new(lhs),
-                op,
-                rhs: Box::new(rhs),
-            },
-        )
+        sum.clone()
+            .then(
+                choice((
+                    op("==").to(BinaryOp::Eq),
+                    op("!=").to(BinaryOp::NotEq),
+                    op("<=").to(BinaryOp::Lte),
+                    op(">=").to(BinaryOp::Gte),
+                    op("<").to(BinaryOp::Lt),
+                    op(">").to(BinaryOp::Gt),
+                ))
+                .then(sum)
+                .or_not(),
+            )
+            .map(|(lhs, comparison)| match comparison {
+                Some((op, rhs)) => Expr::Binary {
+                    lhs: Box::new(lhs),
+                    op,
+                    rhs: Box::new(rhs),
+                },
+                None => lhs,
+            })
     })
     .padded_by(padding())
     .boxed()
@@ -811,8 +849,45 @@ fn tuple_or_group_expr(values: Vec<Expr>) -> Expr {
 fn ident_parser<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Rich<'src, char>>> + Clone
 {
     text::ascii::ident()
-        .map(str::to_string)
+        .try_map(|ident: &str, span| {
+            if is_keyword(ident) {
+                if matches!(ident, "mut" | "take") {
+                    return Err(Rich::custom(
+                        span,
+                        format!(
+                            "`{ident}` is a value-flow marker; use it before a function argument or before a method receiver"
+                        ),
+                    ));
+                }
+                Err(Rich::custom(
+                    span,
+                    format!("`{ident}` is a reserved keyword"),
+                ))
+            } else {
+                Ok(ident.to_owned())
+            }
+        })
         .padded_by(padding())
+}
+
+fn is_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "enum"
+            | "else"
+            | "fn"
+            | "for"
+            | "global"
+            | "if"
+            | "impl"
+            | "let"
+            | "match"
+            | "mut"
+            | "struct"
+            | "take"
+            | "trait"
+            | "type"
+    )
 }
 
 fn generic_params_parser<'src>()
@@ -845,30 +920,67 @@ fn capability_clause_parser<'src>()
 fn keyword<'src>(
     word: &'static str,
 ) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
-    text::ascii::keyword(word).ignored().padded_by(padding())
+    text::ascii::keyword(word).ignored().padded_by(layout())
 }
 
 fn sym<'src>(c: char) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
-    just(c).ignored().padded_by(padding())
+    just(c).ignored().padded_by(layout())
 }
 
 fn op<'src>(
     token: &'static str,
 ) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
-    just(token).ignored().padded_by(padding())
+    just(token).ignored().padded_by(layout())
+}
+
+fn inline_sym<'src>(
+    c: char,
+) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
+    padding()
+        .ignore_then(just(c).ignored())
+        .then_ignore(layout())
+}
+
+fn close_sym<'src>(
+    c: char,
+) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
+    layout()
+        .ignore_then(just(c).ignored())
+        .then_ignore(padding())
 }
 
 fn flow_marker<'src>()
+-> impl Parser<'src, &'src str, ValueFlow, extra::Err<Rich<'src, char>>> + Clone {
+    flow_keyword()
+        .or_not()
+        .map(|flow| flow.unwrap_or(ValueFlow::ReturnedUnchanged))
+}
+
+fn flow_keyword<'src>()
 -> impl Parser<'src, &'src str, ValueFlow, extra::Err<Rich<'src, char>>> + Clone {
     choice((
         keyword("mut").to(ValueFlow::ReturnedChanged),
         keyword("take").to(ValueFlow::NotReturned),
     ))
-    .or_not()
-    .map(|flow| flow.unwrap_or(ValueFlow::ReturnedUnchanged))
 }
 
 fn padding<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
+    let whitespace = any()
+        .filter(|c: &char| c.is_whitespace() && *c != '\n' && *c != '\r')
+        .ignored();
+    let line_comment = just("//").ignore_then(none_of('\n').repeated()).ignored();
+    choice((whitespace, line_comment)).repeated().ignored()
+}
+
+fn line_separator<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone
+{
+    let newline = just('\r').or_not().ignore_then(just('\n')).ignored();
+    padding()
+        .ignore_then(newline.repeated().at_least(1).ignored())
+        .then_ignore(layout())
+}
+
+fn layout<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {
     let whitespace = any().filter(|c: &char| c.is_whitespace()).ignored();
     let line_comment = just("//").ignore_then(none_of('\n').repeated()).ignored();
     choice((whitespace, line_comment)).repeated().ignored()

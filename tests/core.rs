@@ -24,7 +24,7 @@ fn bool_type(types: &mut TypeStore) -> linear::TypeId {
 }
 
 fn u32_type(types: &mut TypeStore) -> linear::TypeId {
-    types.add_uint("u32", 32).unwrap()
+    types.add_uint("U32", 32).unwrap()
 }
 
 #[test]
@@ -1870,5 +1870,76 @@ fn finite_literals_check_cardinality() {
             value: 2,
             values: 2
         })
+    );
+}
+
+#[test]
+fn evaluator_finite_arithmetic_does_not_overflow_u128() {
+    let mut types = TypeStore::new();
+    let huge = types
+        .add_finite(
+            Some("Huge".into()),
+            u128::MAX,
+            DeclaredCapabilities::dup_zap(),
+        )
+        .unwrap();
+    let mut program = CoreProgram::new();
+    let add = program
+        .add_function(Function {
+            name: Some("huge_add".into()),
+            inputs: vec![Param::new(ValueId(0), huge), Param::new(ValueId(1), huge)],
+            outputs: vec![huge],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
+                    Expr::Builtin {
+                        op: BuiltinOp::FiniteAdd { ty: huge },
+                        args: vec![ValueId(0), ValueId(1)],
+                    },
+                ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
+            ],
+            returns: vec![ValueId(4)],
+        })
+        .unwrap();
+    let mul = program
+        .add_function(Function {
+            name: Some("huge_mul".into()),
+            inputs: vec![Param::new(ValueId(0), huge), Param::new(ValueId(1), huge)],
+            outputs: vec![huge],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(2), ValueId(3), ValueId(4)],
+                    Expr::Builtin {
+                        op: BuiltinOp::FiniteMul { ty: huge },
+                        args: vec![ValueId(0), ValueId(1)],
+                    },
+                ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(2) }),
+                Statement::new(vec![], Expr::Zap { value: ValueId(3) }),
+            ],
+            returns: vec![ValueId(4)],
+        })
+        .unwrap();
+
+    assert_eq!(program.check(&types), Ok(()));
+    assert_eq!(
+        Evaluator::new(&types, &program)
+            .run_function(
+                add,
+                vec![Value::Finite(u128::MAX - 1), Value::Finite(u128::MAX - 1)]
+            )
+            .unwrap(),
+        vec![Value::Finite(u128::MAX - 2)]
+    );
+    assert_eq!(
+        Evaluator::new(&types, &program)
+            .run_function(
+                mul,
+                vec![Value::Finite(u128::MAX - 1), Value::Finite(u128::MAX - 1)]
+            )
+            .unwrap(),
+        vec![Value::Finite(1)]
     );
 }
