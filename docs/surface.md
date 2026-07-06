@@ -94,14 +94,14 @@ Function calls have ordered arguments. Labels are optional documentation sugar
 at the call site; they do not reorder arguments.
 
 ```linear
-insert(users, key: id, @value: user)
+insert(users, key: id, take value: user)
 ```
 
 Method syntax is sugar for calling a function with `self` as the first
 argument.
 
 ```linear
-users.insert!(key: id, @value: user)
+users.insert mut(key: id, take value: user)
 ```
 
 Constructors use the type or variant as a callable value.
@@ -193,18 +193,19 @@ until their lowering rules are added.
 At function definitions and call sites:
 
 - no marker: the argument is returned unchanged;
-- `!`: the argument is returned changed;
-- `@`: the argument is consumed and not returned.
+- `mut`: the argument is returned changed;
+- `take`: the argument is consumed and not returned.
 
-Markers can appear before parameters, before call arguments, and after a method
-name to mark the receiver:
+Markers can appear before parameters and before call arguments. For method
+syntax, a marker between the method name and the argument list marks the
+receiver:
 
 ```linear
-fn update(!state: State, config: Config, @event: Event) -> State {
-  apply(!state, config, @event: event)
+fn update(mut state: State, config: Config, take event: Event) -> State {
+  apply(mut state, config, take event: event)
 }
 
-cache.insert!(key: "latest", @value: event)
+cache.insert mut(key: "latest", take value: event)
 ```
 
 This is documentation and sugar for value threading. The checker/lowerer must

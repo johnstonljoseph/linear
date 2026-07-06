@@ -822,8 +822,8 @@ fn op<'src>(
 fn flow_marker<'src>()
 -> impl Parser<'src, &'src str, ValueFlow, extra::Err<Rich<'src, char>>> + Clone {
     choice((
-        sym('!').to(ValueFlow::ReturnedChanged),
-        sym('@').to(ValueFlow::NotReturned),
+        keyword("mut").to(ValueFlow::ReturnedChanged),
+        keyword("take").to(ValueFlow::NotReturned),
     ))
     .or_not()
     .map(|flow| flow.unwrap_or(ValueFlow::ReturnedUnchanged))

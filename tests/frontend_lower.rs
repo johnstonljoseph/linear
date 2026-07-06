@@ -174,7 +174,7 @@ fn lowers_global_and_function_signatures() {
         struct User { id: UserId, balance: u32 }
         global root: User
 
-        fn deposit(!user: User, amount: u32) -> User {
+        fn deposit(mut user: User, amount: u32) -> User {
           user
         }
         "#,
@@ -224,7 +224,7 @@ fn lowers_impl_method_signatures_with_expanded_self() {
             self.balance
           }
 
-          fn with_balance(!self, balance: u32) -> User {
+          fn with_balance(mut self, balance: u32) -> User {
             self
           }
         }

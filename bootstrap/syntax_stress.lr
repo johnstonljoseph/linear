@@ -116,8 +116,8 @@ impl Eq for Money {
 //     DecisionRecorded { request_id: RequestId, decision: Decision },
 // }
 
-fn add_event(!events: Events, @event: Event) -> Events {
-  events.push!(@event)
+fn add_event(mut events: Events, take event: Event) -> Events {
+  events.push mut(take event)
 }
 
 fn decide(request: Request, user: User) -> Decision {
@@ -132,26 +132,26 @@ fn decide(request: Request, user: User) -> Decision {
   }
 }
 
-fn apply_decision(!users: Users, request: Request, decision: Decision, !events: Events) -> { users: Users, events: Events } {
+fn apply_decision(mut users: Users, request: Request, decision: Decision, mut events: Events) -> { users: Users, events: Events } {
   match decision {
     .allow { reason }: {
       let current = users.get(key: request.body.target)
       let next_balance = current.balance.add(delta: request.body.amount)
       let next_user = User { id: current.id, org_id: current.org_id, balance: next_balance, flags: current.flags }
-      let users1 = users.insert!(key: current.id, @value: next_user)
+      let users1 = users.insert mut(key: current.id, take value: next_user)
       let event = Event.balance_adjusted { id: current.id, delta: request.body.amount }
-      let events1 = add_event(!events, @event: event)
+      let events1 = add_event(mut events, take event: event)
       let { users: users2, events: events2 } = { users: users1, events: events1 }
       { users: users2, events: events2 }
     },
     .deny { reason }: {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
-      let events1 = add_event(!events, @event: event)
+      let events1 = add_event(mut events, take event: event)
       { users: users, events: events1 }
     },
     .review { queue, priority }: {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
-      let events1 = add_event(!events, @event: event)
+      let events1 = add_event(mut events, take event: event)
       { users: users, events: events1 }
     },
   }

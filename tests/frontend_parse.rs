@@ -189,7 +189,7 @@ fn parses_value_flow_markers_on_method_receivers() {
     let module = parse_module(
         r#"
         fn run(cache: Cache, event: Event) -> Cache {
-            cache.insert!(key: "latest", @value: event)
+            cache.insert mut(key: "latest", take value: event)
         }
         "#,
     )
@@ -224,8 +224,8 @@ fn parses_value_flow_markers_on_method_receivers() {
 fn parses_value_flow_markers_on_params_and_args() {
     let module = parse_module(
         r#"
-        fn update(!state: State, config: Config, @event: Event) -> State {
-            apply(!state, config, @event: event)
+        fn update(mut state: State, config: Config, take event: Event) -> State {
+            apply(mut state, config, take event: event)
         }
         "#,
     )
@@ -274,7 +274,7 @@ fn parses_impl_methods_with_self_as_first_arg() {
                 self.balance
             }
 
-            fn with_balance(!self: User, balance: u32) -> User {
+            fn with_balance(mut self: User, balance: u32) -> User {
                 User { id: self.id, balance: balance }
             }
         }

@@ -19,15 +19,15 @@ impl User {
   }
 }
 
-fn add_audit(!audit: Audit, @message: Text) -> Audit {
-  audit.push!(@message)
+fn add_audit(mut audit: Audit, take message: Text) -> Audit {
+  audit.push mut(take message)
 }
 
-fn update_balance(!users: Users, id: UserId, delta: Balance, !audit: Audit) -> { users: Users, audit: Audit } {
+fn update_balance(mut users: Users, id: UserId, delta: Balance, mut audit: Audit) -> { users: Users, audit: Audit } {
   let fallback = User { id: id, balance: 0 }
   let user = users.get_or(key: id, default: fallback)
   let updated = user.with_balance(balance: user.balance + delta)
-  let users1 = users.insert!(key: id, @value: updated)
-  let audit1 = add_audit(!audit, @message: "balance updated")
+  let users1 = users.insert mut(key: id, take value: updated)
+  let audit1 = add_audit(mut audit, take message: "balance updated")
   { users: users1, audit: audit1 }
 }
