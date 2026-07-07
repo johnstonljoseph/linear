@@ -135,52 +135,6 @@ impl TypeStore {
         )
     }
 
-    pub fn add_list(
-        &mut self,
-        name: Option<String>,
-        element: TypeId,
-        mutability: CollectionMutability,
-    ) -> Result<TypeId, TypeError> {
-        self.validate_type(element)?;
-        self.add_type(
-            name,
-            TypeKind::List {
-                element,
-                mutability,
-            },
-            DeclaredCapabilities::linear(),
-        )
-    }
-
-    pub fn add_vector(
-        &mut self,
-        name: Option<String>,
-        element: TypeId,
-        mutability: CollectionMutability,
-    ) -> Result<TypeId, TypeError> {
-        self.add_list(name, element, mutability)
-    }
-
-    pub fn add_hashmap(
-        &mut self,
-        name: Option<String>,
-        key: TypeId,
-        value: TypeId,
-        mutability: CollectionMutability,
-    ) -> Result<TypeId, TypeError> {
-        self.validate_type(key)?;
-        self.validate_type(value)?;
-        self.add_type(
-            name,
-            TypeKind::HashMap {
-                key,
-                value,
-                mutability,
-            },
-            DeclaredCapabilities::linear(),
-        )
-    }
-
     pub fn add_primitive(
         &mut self,
         name: impl Into<String>,
@@ -266,28 +220,6 @@ impl TypeStore {
             | TypeKind::Symbol
             | TypeKind::Text => Ok(Capabilities::dup_zap()),
             TypeKind::Primitive => Ok(Capabilities::linear()),
-            TypeKind::List {
-                element,
-                mutability,
-            } => match mutability {
-                CollectionMutability::Mutable => Ok(Capabilities::linear()),
-                CollectionMutability::Immutable => self.capabilities(*element),
-            },
-            TypeKind::HashMap {
-                key,
-                value,
-                mutability,
-            } => match mutability {
-                CollectionMutability::Mutable => Ok(Capabilities::linear()),
-                CollectionMutability::Immutable => {
-                    let key_caps = self.capabilities(*key)?;
-                    let value_caps = self.capabilities(*value)?;
-                    Ok(Capabilities {
-                        dup: key_caps.dup && value_caps.dup,
-                        zap: key_caps.zap && value_caps.zap,
-                    })
-                }
-            },
             TypeKind::Sum(components) | TypeKind::Product(components) => {
                 let mut caps = Capabilities::dup_zap();
                 for component in components {
@@ -336,35 +268,6 @@ impl TypeStore {
             | TypeKind::Symbol
             | TypeKind::Text => Capabilities::dup_zap(),
             TypeKind::Primitive => Capabilities::linear(),
-            TypeKind::List {
-                element,
-                mutability,
-            } => match mutability {
-                CollectionMutability::Mutable => Capabilities::linear(),
-                CollectionMutability::Immutable => {
-                    visiting.push(id);
-                    let caps = self.capabilities_inner(*element, visiting)?;
-                    visiting.pop();
-                    caps
-                }
-            },
-            TypeKind::HashMap {
-                key,
-                value,
-                mutability,
-            } => match mutability {
-                CollectionMutability::Mutable => Capabilities::linear(),
-                CollectionMutability::Immutable => {
-                    visiting.push(id);
-                    let key_caps = self.capabilities_inner(*key, visiting)?;
-                    let value_caps = self.capabilities_inner(*value, visiting)?;
-                    visiting.pop();
-                    Capabilities {
-                        dup: key_caps.dup && value_caps.dup,
-                        zap: key_caps.zap && value_caps.zap,
-                    }
-                }
-            },
             TypeKind::Sum(variants) | TypeKind::Product(variants) => {
                 visiting.push(id);
                 let mut caps = Capabilities::dup_zap();
@@ -413,22 +316,7 @@ pub enum TypeKind {
     },
     Symbol,
     Text,
-    List {
-        element: TypeId,
-        mutability: CollectionMutability,
-    },
-    HashMap {
-        key: TypeId,
-        value: TypeId,
-        mutability: CollectionMutability,
-    },
     Primitive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CollectionMutability {
-    Immutable,
-    Mutable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

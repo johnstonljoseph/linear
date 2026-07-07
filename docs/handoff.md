@@ -40,6 +40,7 @@ Current crate modules:
 
 - `src/types.rs`: type arena and type capabilities.
 - `src/core.rs`: semantic core program, expressions, checker, builtins.
+- `src/flow.rs`: value-flow inference and flow-marker contract checking.
 - `src/eval.rs`: interpreter for checked core programs.
 - `src/frontend/ast.rs`: parsed frontend AST.
 - `src/frontend/parse.rs`: Chumsky parser for the current surface syntax.
@@ -116,15 +117,18 @@ Compact finite types exist for numbers:
 Finite types are isomorphic to huge sums of `Unit`, but they are represented
 compactly and operated on with builtins.
 
-Other built-in type families:
+Other built-in types:
 
 - `Bool`: a two-variant sum over `Unit`;
 - `Symbol`;
 - `Text`;
-- `List<T>` / `Vector<T>` / `Vec<T>`;
-- `MutList<T>` / `MutVector<T>` / `MutVec<T>`;
-- `HashMap<K, V>`;
-- `MutHashMap<K, V>`.
+- `Token`: a builtin linear opaque primitive (neither `Dup` nor `Zap`), kept
+  so surface programs can exercise strict linearity while collections are
+  redesigned.
+
+Collection type families (`List`, `HashMap`, and their mutable variants) have
+been removed from the scaffold pending the collections redesign; see the open
+questions section.
 
 ## Capabilities And Linearity
 
@@ -147,12 +151,10 @@ Current capability behavior:
 - `Unit`, `Never`, finite types, function types, `Symbol`, and `Text` support
   both `Dup` and `Zap`.
 - products and sums derive capabilities structurally from components.
-- immutable collections derive capabilities structurally from contents.
-- mutable collections are linear regardless of contents.
 
 Declared capabilities on composite types are checked against the structural
-capabilities. A product, sum, or collection cannot declare `Dup` or `Zap` unless
-its components already support that capability. Opaque primitive types are the
+capabilities. A product or sum cannot declare `Dup` or `Zap` unless its
+components already support that capability. Opaque primitive types are the
 escape hatch for axiomatic capabilities.
 
 There is no separate "unrestricted" flag in the type model. A type that can be
@@ -253,12 +255,11 @@ but it should preserve efficient proving:
 
 ## Builtins
 
-Current core builtins include:
+Current core builtins:
 
 - finite arithmetic: add, sub, mul;
 - finite comparison: eq, lt;
-- list operations: empty, push, len, get;
-- hashmap operations: empty, insert, get_or, contains.
+- finite next: a toy update builtin.
 
 Finite arithmetic/comparison builtins are observer-style. They consume operands
 and return operands unchanged before the visible result:
@@ -272,18 +273,37 @@ This is intentional. Infix expressions are just sugar for ordinary primitive
 function calls with value-flow metadata. The frontend does not invent `dup`
 when a value is read by an observer op.
 
-Collection builtins thread the collection handle:
+`next(x) -> x'` consumes a finite value and returns `x + 1` modulo the type
+cardinality as a changed version. It exists so value-flow checking has an
+axiomatic "output is not the same version" primitive to recurse to until real
+update builtins (collections, handles) land.
 
-- `len(list) -> (list, len)`;
-- `get(list, index) -> (residual_list, element)`;
-- `insert(map, key, value) -> map`.
+## Value-Flow Checking
 
-Collection reads are extractive: the returned collection is a residual state
-with the element/value moved out, not the original collection plus a copied
-element. The residual uses the same collection type; any hole/deletion
-bookkeeping is black-boxed inside collection builtins and later backend
-lowering. If a program wants to recover an equivalent original collection, it
-must duplicate the extracted value and reinsert one copy.
+`src/flow.rs` infers, for every core function, whether each output slot is
+provably the same version of one input. Builtins declare flow axiomatically;
+summaries compose through calls and match joins; a fixpoint over the call
+graph handles recursion and mutual recursion (a never-terminating path
+constrains nothing and satisfies any contract vacuously). `dup` propagates the
+source version to both copies, which is sound for immutable value semantics.
+
+After body lowering, each function's flow markers are checked against its
+inferred summary:
+
+- unmarked parameter not provably returned unchanged: hard `LowerError::Flow`;
+- `mut` parameter provably unchanged on every path: recorded in
+  `LoweredModule::flow_warnings` as `MutIsBorrow`. This is a warning rather
+  than an error because, until assignment or update builtins are lowerable
+  from the surface, a finite `mut` parameter cannot legitimately change;
+- `take` parameter whose exact version provably escapes into any output slot:
+  recorded as `TakeIsBorrow`. Linearity guarantees the value is consumed
+  somehow, but if it is provably moved through unchanged the marker should
+  have been a borrow (or the function is a deliberate move-through).
+
+Same-version tracking is whole-value today. Projecting a field out of a
+product and reassembling identical parts is not yet recognized; that
+path-sensitive extension is exactly what the planned borrow/plug design needs
+and belongs in the same lattice.
 
 ## Surface Syntax
 
@@ -316,9 +336,9 @@ fn below_ten(x: U32) -> Bool {
 
 fn reason(take decision: Decision) -> U32 {
   match decision {
-    .allow { reason }: reason,
-    .deny: 0,
-    .review { queue, priority: p }: p,
+    .allow { reason } => reason,
+    .deny => 0,
+    .review { queue, priority: p } => p,
   }
 }
 ```
@@ -356,7 +376,7 @@ Implemented type lowering:
 - nominal enums;
 - built-in finite integer aliases;
 - `Bool`, `Symbol`, `Text`;
-- collection type families listed above.
+- the builtin `Token` linear primitive.
 
 Parsed but rejected:
 
@@ -396,10 +416,11 @@ The test suite covers:
 - type construction and capabilities;
 - core linear checker behavior;
 - evaluator behavior for products, sums, finite builtins, functions, globals,
-  recursion, lists, and hashmaps;
+  and recursion;
+- value-flow inference and marker contract checking (`tests/flow.rs`);
 - frontend parsing;
 - frontend lowering for signatures, flow markers, products, enums, match, and
-  arithmetic.
+  arithmetic, including flow-marker verification.
 
 Run:
 
@@ -559,7 +580,8 @@ Recommended next steps:
 
 2. Lower ordinary product field access and update/reassembly sugar.
 
-3. Add frontend access to collection builtins.
+3. Design and add the new collection primitives (see the derivative /
+   one-hole-context discussion), then frontend access to them.
 
 4. Add simple collection examples:
    - build a list;

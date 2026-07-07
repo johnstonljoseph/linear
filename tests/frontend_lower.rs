@@ -1,6 +1,6 @@
 use linear::frontend::ValueFlow;
 use linear::{
-    Capabilities, CollectionMutability, Component, ComponentName, CoreError, Evaluator, TypeError,
+    Capabilities, Component, ComponentName, CoreError, Evaluator, FlowViolation, TypeError,
     TypeKind, Value, frontend,
 };
 
@@ -78,85 +78,27 @@ fn lowers_tuple_structs_and_anonymous_products() {
 }
 
 #[test]
-fn lowers_builtin_collection_types_and_interns_repeated_shapes() {
-    let types = lower(
-        r#"
-        type UserId = U32
-        struct User { id: UserId, balance: U32 }
-        struct Store {
-          active: HashMap<UserId, User>,
-          pending: HashMap<UserId, User>,
-          log: List<User>,
-          work: MutList<User>,
-          edits: MutHashMap<UserId, User>,
-        }
-        "#,
-    );
-
-    let user = types.type_id("User").unwrap();
-    let user_id = types.type_id("UserId").unwrap();
-    let store = types.type_id("Store").unwrap();
-    let TypeKind::Product(fields) = &types.get(store).unwrap().kind else {
-        panic!("expected product");
-    };
-
-    let active_ty = fields[0].ty;
-    let pending_ty = fields[1].ty;
-    assert_eq!(active_ty, pending_ty);
-    assert_eq!(
-        types.get(active_ty).unwrap().kind,
-        TypeKind::HashMap {
-            key: user_id,
-            value: user,
-            mutability: CollectionMutability::Immutable,
-        }
-    );
-    assert_eq!(
-        types.get(fields[2].ty).unwrap().kind,
-        TypeKind::List {
-            element: user,
-            mutability: CollectionMutability::Immutable,
-        }
-    );
-    assert_eq!(
-        types.get(fields[3].ty).unwrap().kind,
-        TypeKind::List {
-            element: user,
-            mutability: CollectionMutability::Mutable,
-        }
-    );
-    assert_eq!(
-        types.get(fields[4].ty).unwrap().kind,
-        TypeKind::HashMap {
-            key: user_id,
-            value: user,
-            mutability: CollectionMutability::Mutable,
-        }
-    );
-}
-
-#[test]
-fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
+fn rejects_unknown_types_and_bad_generic_arity() {
     let module = frontend::parse_module("struct Bad { missing: Missing }").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::UnknownType("Missing".into())
     );
 
-    let module = frontend::parse_module("struct Bad { xs: List<U32, U32> }").unwrap();
+    let module = frontend::parse_module("struct Bad { xs: List<U32> }").unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::UnknownType("List".into())
+    );
+
+    let module = frontend::parse_module("struct Bad { x: U32<U32> }").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::BadGenericArity {
-            name: "List".into(),
-            expected: 1,
-            actual: 2,
+            name: "U32".into(),
+            expected: 0,
+            actual: 1,
         }
-    );
-
-    let module = frontend::parse_module("struct Box<T> { value: T }").unwrap();
-    assert_eq!(
-        frontend::lower_type_items(&module).unwrap_err(),
-        frontend::LowerError::UnsupportedGenericDecl { name: "Box".into() }
     );
 
     let module = frontend::parse_module("type U32 = U16").unwrap();
@@ -181,8 +123,99 @@ fn rejects_unknown_types_bad_collection_arity_and_generic_type_decls() {
 }
 
 #[test]
+fn lowers_user_defined_generic_types_by_instantiation() {
+    let types = lower(
+        r#"
+        struct Box<T> { value: T }
+        enum Option<T> {
+          none,
+          some(T),
+        }
+        type Pair<T> = (T, T)
+
+        struct UsesGenerics {
+          first: Box<U32>,
+          second: Box<U32>,
+          maybe: Option<U32>,
+          pair: Pair<U32>,
+          nested: Box<Box<U32>>,
+        }
+        "#,
+    );
+
+    assert!(types.type_id("Box").is_none());
+    assert!(types.type_id("Option").is_none());
+
+    let u32_ty = types.type_id("U32").unwrap();
+    let uses = types.type_id("UsesGenerics").unwrap();
+    let TypeKind::Product(fields) = &types.get(uses).unwrap().kind else {
+        panic!("expected product");
+    };
+
+    let first_box = fields[0].ty;
+    let second_box = fields[1].ty;
+    assert_eq!(first_box, second_box);
+    assert_eq!(
+        types.get(first_box).unwrap().kind,
+        TypeKind::Product(vec![Component::named("value", u32_ty)])
+    );
+
+    let option = fields[2].ty;
+    assert_eq!(
+        types.get(option).unwrap().kind,
+        TypeKind::Sum(vec![
+            Component::named("none", types.unit()),
+            Component::named("some", u32_ty),
+        ])
+    );
+
+    let pair = fields[3].ty;
+    assert_eq!(
+        types.get(pair).unwrap().kind,
+        TypeKind::Product(vec![
+            Component::positional(0, u32_ty),
+            Component::positional(1, u32_ty),
+        ])
+    );
+
+    let nested = fields[4].ty;
+    let TypeKind::Product(nested_fields) = &types.get(nested).unwrap().kind else {
+        panic!("expected nested box product");
+    };
+    assert_eq!(nested_fields[0].ty, first_box);
+}
+
+#[test]
+fn generic_type_lowering_reports_bad_instantiations() {
+    let module = frontend::parse_module(
+        r#"
+        struct Box<T> { value: T }
+        struct Bad { value: Box<U32, U32> }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::BadGenericArity {
+            name: "Box".into(),
+            expected: 1,
+            actual: 2,
+        }
+    );
+
+    let module = frontend::parse_module("struct Bad<T, T> { value: T }").unwrap();
+    assert_eq!(
+        frontend::lower_type_items(&module).unwrap_err(),
+        frontend::LowerError::DuplicateGenericParam {
+            name: "Bad".into(),
+            param: "T".into(),
+        }
+    );
+}
+
+#[test]
 fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
-    let module = frontend::parse_module("struct Bad { work: MutList<U32> }: Dup").unwrap();
+    let module = frontend::parse_module("struct Bad { work: Token }: Dup").unwrap();
     assert_eq!(
         frontend::lower_type_items(&module).unwrap_err(),
         frontend::LowerError::Type(TypeError::DeclaredCapabilityExceedsStructural {
@@ -197,7 +230,7 @@ fn rejects_declared_capabilities_that_exceed_structural_capabilities() {
     let module = frontend::parse_module(
         r#"
         enum Bad {
-          item(MutList<U32>),
+          item(Token),
         }: Zap
         "#,
     )
@@ -715,8 +748,8 @@ fn lowers_match_with_record_payload_patterns() {
 
         fn reason(take decision: Decision) -> U32 {
           match decision {
-            .allow { reason }: reason,
-            .deny: 0,
+            .allow { reason } => reason,
+            .deny => 0,
           }
         }
         "#,
@@ -744,8 +777,8 @@ fn match_branches_thread_unchanged_params() {
 
         fn score(config: U32, take value: MaybeU32) -> U32 {
           match value {
-            .none: config + 1,
-            .some(x): x + config,
+            .none => config + 1,
+            .some(x) => x + config,
           }
         }
         "#,
@@ -779,8 +812,8 @@ fn match_branches_thread_live_locals() {
         fn after_match(take value: MaybeU32) -> U32 {
           let y = 5
           let z = match value {
-            .none: 1,
-            .some(x): x + 2,
+            .none => 1,
+            .some(x) => x + 2,
           }
           y + z
         }
@@ -811,8 +844,8 @@ fn match_expression_synthesizes_visible_result_type() {
 
         fn score(take value: MaybeU32) -> U32 {
           let z = match value {
-            .none: 1,
-            .some(x): x + 2,
+            .none => 1,
+            .some(x) => x + 2,
           }
           z
         }
@@ -843,8 +876,8 @@ fn match_expression_synthesizes_payload_derived_result_type() {
 
         fn pick(take value: EitherU32) -> U32 {
           let z = match value {
-            .left(v): v,
-            .right(w): w,
+            .left(v) => v,
+            .right(w) => w,
           }
           z
         }
@@ -868,6 +901,96 @@ fn match_expression_synthesizes_payload_derived_result_type() {
 }
 
 #[test]
+fn lowers_if_expression_as_bool_match() {
+    let module = frontend::parse_module(
+        r#"
+        fn choose(take x: U32, take y: U32) -> U32 {
+          if x < y {
+            x + 1
+          } else {
+            y + 1
+          }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("choose").unwrap();
+    let evaluator = Evaluator::new(&lowered.types, &lowered.program);
+
+    assert_eq!(
+        evaluator
+            .run_function(function, vec![Value::Finite(3), Value::Finite(5)])
+            .unwrap(),
+        vec![Value::Finite(4)]
+    );
+    assert_eq!(
+        evaluator
+            .run_function(function, vec![Value::Finite(8), Value::Finite(5)])
+            .unwrap(),
+        vec![Value::Finite(6)]
+    );
+}
+
+#[test]
+fn if_expression_synthesizes_result_type_and_threads_live_locals() {
+    let module = frontend::parse_module(
+        r#"
+        fn score(take x: U32, take y: U32) -> U32 {
+          let base = 5
+          let z = if x < y {
+            let bump = 1
+            base + bump
+          } else {
+            let bump = 2
+            base + bump
+          }
+          base + z
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("score").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(3), Value::Finite(5)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(11)]);
+}
+
+#[test]
+fn lowers_unit_if_as_expression_statement() {
+    let module = frontend::parse_module(
+        r#"
+        fn touch(x: U32) -> () {
+          ()
+        }
+
+        fn run(take x: U32, take y: U32) -> U32 {
+          if x < y {
+            touch(x)
+          } else {
+            touch(y)
+          }
+          x + 1
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let function = lowered.program.function_id("run").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(function, vec![Value::Finite(3), Value::Finite(5)])
+        .unwrap();
+
+    assert_eq!(result, vec![Value::Finite(4)]);
+}
+
+#[test]
 fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
     let module = frontend::parse_module(
         r#"
@@ -887,7 +1010,7 @@ fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
 
     let module = frontend::parse_module(
         r#"
-        fn leak(take x: MutList<U32>, take y: MutList<U32>) -> MutList<U32> {
+        fn leak(take x: Token, take y: Token) -> Token {
           x
         }
         "#,
@@ -904,7 +1027,7 @@ fn body_lowering_rejects_unsupported_expressions_and_linear_leaks() {
 fn body_lowering_reports_dead_linear_local_by_name() {
     let module = frontend::parse_module(
         r#"
-        fn leak_local(take start: MutList<U32>) -> () {
+        fn leak_local(take start: Token) -> () {
           let h = start
           ()
         }
@@ -916,5 +1039,79 @@ fn body_lowering_reports_dead_linear_local_by_name() {
     assert!(
         matches!(&err, frontend::LowerError::DeadLinearLocal { name, .. } if name == "h"),
         "{err:?}"
+    );
+}
+
+#[test]
+fn mut_params_that_never_change_are_reported_as_borrows() {
+    let module = frontend::parse_module(
+        r#"
+        fn below_ten(mut x: U32) -> Bool {
+          x < 10
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    assert_eq!(
+        lowered.flow_warnings,
+        vec![FlowViolation::MutIsBorrow {
+            function: "below_ten".into(),
+            param: "x".into(),
+        }]
+    );
+}
+
+#[test]
+fn borrowed_params_are_verified_through_calls_and_matches() {
+    let module = frontend::parse_module(
+        r#"
+        enum Maybe {
+          none,
+          some(U32),
+        }
+
+        fn observe(config: U32) -> Bool {
+          config < 10
+        }
+
+        fn score(config: U32, take value: Maybe) -> U32 {
+          let _ = observe(config)
+          match value {
+            .none => 0,
+            .some(v) => v + config,
+          }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    assert!(
+        lowered.flow_warnings.is_empty(),
+        "{:?}",
+        lowered.flow_warnings
+    );
+}
+
+#[test]
+fn take_params_that_are_returned_unchanged_are_reported_as_borrows() {
+    let module = frontend::parse_module(
+        r#"
+        fn pass_through(take x: U32) -> U32 {
+          x
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    assert_eq!(
+        lowered.flow_warnings,
+        vec![FlowViolation::TakeIsBorrow {
+            function: "pass_through".into(),
+            param: "x".into(),
+        }]
     );
 }

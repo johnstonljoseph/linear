@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::core::{BuiltinOp, CoreProgram, Expr, Function, GlobalExpr, MatchArm, Statement};
 use crate::id::{FunctionId, GlobalId, TypeId, ValueId};
@@ -13,8 +13,6 @@ pub enum Value {
     Text(String),
     Product(Vec<Value>),
     Sum { variant: usize, payload: Box<Value> },
-    List(Vec<Value>),
-    HashMap(BTreeMap<Value, Value>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -354,50 +352,11 @@ impl<'a> Evaluator<'a> {
                     bool_value(lhs < rhs),
                 ])
             }
-            BuiltinOp::ListEmpty { .. } => Ok(vec![Value::List(Vec::new())]),
-            BuiltinOp::ListPush { .. } => {
-                let [list, element] = expect_array(args)?;
-                let mut list = expect_list(list)?;
-                list.push(element);
-                Ok(vec![Value::List(list)])
-            }
-            BuiltinOp::ListLen { .. } => {
-                let [list] = expect_array(args)?;
-                let list = expect_list(list)?;
-                let len = list.len() as u128;
-                Ok(vec![Value::List(list), Value::Finite(len)])
-            }
-            BuiltinOp::ListGet { .. } => {
-                let [list, index] = expect_array(args)?;
-                let mut list = expect_list(list)?;
-                let index = expect_finite(index)? as usize;
-                if index >= list.len() {
-                    return Err(EvalError::IndexOutOfBounds {
-                        index,
-                        len: list.len(),
-                    });
-                }
-                let element = list.remove(index);
-                Ok(vec![Value::List(list), element])
-            }
-            BuiltinOp::HashMapEmpty { .. } => Ok(vec![Value::HashMap(BTreeMap::new())]),
-            BuiltinOp::HashMapInsert { .. } => {
-                let [map, key, value] = expect_array(args)?;
-                let mut map = expect_map(map)?;
-                map.insert(key, value);
-                Ok(vec![Value::HashMap(map)])
-            }
-            BuiltinOp::HashMapGetOr { .. } => {
-                let [map, key, default] = expect_array(args)?;
-                let mut map = expect_map(map)?;
-                let value = map.remove(&key).unwrap_or(default);
-                Ok(vec![Value::HashMap(map), value])
-            }
-            BuiltinOp::HashMapContains { .. } => {
-                let [map, key] = expect_array(args)?;
-                let map = expect_map(map)?;
-                let contains = map.contains_key(&key);
-                Ok(vec![Value::HashMap(map), bool_value(contains)])
+            BuiltinOp::FiniteNext { ty } => {
+                let modulus = finite_cardinality(self.types, *ty)?;
+                let [value] = expect_array(args)?;
+                let value = expect_finite(value)?;
+                Ok(vec![Value::Finite(mod_add(value, 1, modulus))])
             }
         }
     }
@@ -532,22 +491,3 @@ fn expect_finite(value: Value) -> Result<u128, EvalError> {
     }
 }
 
-fn expect_list(value: Value) -> Result<Vec<Value>, EvalError> {
-    match value {
-        Value::List(value) => Ok(value),
-        actual => Err(EvalError::RuntimeType {
-            expected: "list",
-            actual,
-        }),
-    }
-}
-
-fn expect_map(value: Value) -> Result<BTreeMap<Value, Value>, EvalError> {
-    match value {
-        Value::HashMap(value) => Ok(value),
-        actual => Err(EvalError::RuntimeType {
-            expected: "hashmap",
-            actual,
-        }),
-    }
-}

@@ -1,5 +1,5 @@
 use linear::{
-    Capabilities, CollectionMutability, Component, DeclaredCapabilities, TypeError, TypeId,
+    Capabilities, Component, DeclaredCapabilities, TypeError, TypeId,
     TypeKind, TypeStore,
 };
 
@@ -183,73 +183,6 @@ fn function_types_have_dup_and_zap() {
         .unwrap();
 
     assert_eq!(store.capabilities(f).unwrap(), Capabilities::dup_zap());
-}
-
-#[test]
-fn mutable_collection_types_are_linear() {
-    let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("U32", 32).unwrap();
-    let list = store
-        .add_list(
-            Some("MutableListU32".into()),
-            u32_ty,
-            CollectionMutability::Mutable,
-        )
-        .unwrap();
-    let hashmap = store
-        .add_hashmap(
-            Some("MutableHashMapU32U32".into()),
-            u32_ty,
-            u32_ty,
-            CollectionMutability::Mutable,
-        )
-        .unwrap();
-
-    assert!(!store.can_dup(list).unwrap());
-    assert!(!store.can_zap(list).unwrap());
-    assert!(!store.can_dup(hashmap).unwrap());
-    assert!(!store.can_zap(hashmap).unwrap());
-}
-
-#[test]
-fn immutable_collection_capabilities_are_structural() {
-    let mut store = TypeStore::new();
-    let u32_ty = store.add_uint("U32", 32).unwrap();
-    let token = store
-        .add_primitive("Token", DeclaredCapabilities::linear())
-        .unwrap();
-    let list = store
-        .add_list(
-            Some("ImmutableListU32".into()),
-            u32_ty,
-            CollectionMutability::Immutable,
-        )
-        .unwrap();
-    let hashmap = store
-        .add_hashmap(
-            Some("ImmutableHashMapU32U32".into()),
-            u32_ty,
-            u32_ty,
-            CollectionMutability::Immutable,
-        )
-        .unwrap();
-    let linear_list = store
-        .add_list(
-            Some("ImmutableListToken".into()),
-            token,
-            CollectionMutability::Immutable,
-        )
-        .unwrap();
-
-    assert_eq!(store.capabilities(list).unwrap(), Capabilities::dup_zap());
-    assert_eq!(
-        store.capabilities(hashmap).unwrap(),
-        Capabilities::dup_zap()
-    );
-    assert_eq!(
-        store.capabilities(linear_list).unwrap(),
-        Capabilities::linear()
-    );
 }
 
 #[test]

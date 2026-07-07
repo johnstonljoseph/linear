@@ -12,36 +12,36 @@ type RequestId = U32
 struct Pair<T, U> { first: T, second: U }
 
 enum Option<T> {
-  none,
-  some(T),
+  none
+  some(T)
 }
 
 struct Money { cents: Cents, currency: U32 }
 
 struct User {
-  id: UserId,
-  org_id: OrgId,
-  balance: Money,
-  flags: { is_admin: Bool, is_locked: Bool, risk_score: U32 },
+  id: UserId
+  org_id: OrgId
+  balance: Money
+  flags: { is_admin: Bool, is_locked: Bool, risk_score: U32 }
 }
 
 struct Request {
-  id: RequestId,
-  actor: UserId,
-  at: UnixTime,
-  body: { kind: U32, amount: Money, target: UserId },
+  id: RequestId
+  actor: UserId
+  at: UnixTime
+  body: { kind: U32, amount: Money, target: UserId }
 }
 
 enum Decision {
-  allow { reason: U32 },
-  deny { reason: U32 },
-  review { queue: U32, priority: U32 },
+  allow { reason: U32 }
+  deny { reason: U32 }
+  review { queue: U32, priority: U32 }
 }
 
 enum Event {
-  user_created { id: UserId, initial_balance: Money },
-  balance_adjusted { id: UserId, delta: Money },
-  decision_recorded { request_id: RequestId, decision: Decision },
+  user_created { id: UserId, initial_balance: Money }
+  balance_adjusted { id: UserId, delta: Money }
+  decision_recorded { request_id: RequestId, decision: Decision }
 }
 
 type Users = HashMap<UserId, User>
@@ -134,7 +134,7 @@ fn decide(request: Request, user: User) -> Decision {
 
 fn apply_decision(mut users: Users, request: Request, decision: Decision, mut events: Events) -> { users: Users, events: Events } {
   match decision {
-    .allow { reason }: {
+    .allow { reason } => {
       let current = users.get(request.body.target)
       let next_balance = current.balance.add(request.body.amount)
       let next_user = User { id: current.id, org_id: current.org_id, balance: next_balance, flags: current.flags }
@@ -143,17 +143,17 @@ fn apply_decision(mut users: Users, request: Request, decision: Decision, mut ev
       let events1 = add_event(mut events, take event)
       let { users: users2, events: events2 } = { users: users1, events: events1 }
       { users: users2, events: events2 }
-    },
-    .deny { reason }: {
+    }
+    .deny { reason } => {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
       let events1 = add_event(mut events, take event)
       { users: users, events: events1 }
-    },
-    .review { queue, priority }: {
+    }
+    .review { queue, priority } => {
       let event = Event.decision_recorded { request_id: request.id, decision: decision }
       let events1 = add_event(mut events, take event)
       { users: users, events: events1 }
-    },
+    }
   }
 }
 

@@ -6,6 +6,7 @@
 
 pub mod core;
 pub mod eval;
+pub mod flow;
 pub mod frontend;
 pub mod id;
 pub mod types;
@@ -15,8 +16,12 @@ pub use core::{
     Param, Statement,
 };
 pub use eval::{EvalError, Evaluator, Value};
+pub use flow::{
+    FlowViolation, FunctionFlow, ParamContract, Provenance, check_function_contract,
+    infer_function_flows,
+};
 pub use id::{FunctionId, GlobalId, TypeId, ValueId};
 pub use types::{
-    Capabilities, CollectionMutability, Component, ComponentName, DeclaredCapabilities, TypeDef,
-    TypeError, TypeKind, TypeStore,
+    Capabilities, Component, ComponentName, DeclaredCapabilities, TypeDef, TypeError, TypeKind,
+    TypeStore,
 };

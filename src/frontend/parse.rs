@@ -4,8 +4,10 @@ use super::ast::{
     Arg, BinaryOp, Block, Expr, Field, FunctionDef, FunctionSig, GlobalDef, ImplBlock, Item,
     LetStmt, MatchArm, Module, Param, Pattern, Stmt, TraitDef, TypeDef, TypeExpr, ValueFlow,
 };
+use super::diagnostic::{Diagnostic, SourceSpan};
 
 pub type ParseErrors = Vec<String>;
+pub type ParseDiagnostics = Vec<Diagnostic>;
 
 #[derive(Clone, Debug)]
 struct RawParam {
@@ -24,10 +26,30 @@ struct RawMethodDef {
 }
 
 pub fn parse_module(src: &str) -> Result<Module, ParseErrors> {
+    parse_module_diagnostics(src).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    })
+}
+
+pub fn parse_module_diagnostics(src: &str) -> Result<Module, ParseDiagnostics> {
     module_parser()
         .parse(src)
         .into_result()
-        .map_err(|errors| errors.into_iter().map(|error| error.to_string()).collect())
+        .map_err(|errors| errors.into_iter().map(parse_diagnostic).collect())
+}
+
+fn parse_diagnostic(error: Rich<'_, char>) -> Diagnostic {
+    let span = *error.span();
+    Diagnostic::spanned(
+        error.to_string(),
+        SourceSpan {
+            start: span.start,
+            end: span.end,
+        },
+    )
 }
 
 fn module_parser<'src>()
@@ -74,18 +96,18 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
 
     let braced_struct_body = named_type_field
         .clone()
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('{'), sym('}'))
+        .delimited_by(sym('{'), close_sym('}'))
         .map(record_type);
 
     let tuple_struct_body = ty
         .clone()
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('('), sym(')'))
+        .delimited_by(sym('('), close_sym(')'))
         .map(tuple_struct_type);
 
     let struct_def = keyword("struct")
@@ -104,18 +126,18 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
 
     let record_variant_payload = named_type_field
         .clone()
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('{'), sym('}'))
+        .delimited_by(sym('{'), close_sym('}'))
         .map(record_type);
 
     let tuple_variant_payload = ty
         .clone()
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('('), sym(')'))
+        .delimited_by(sym('('), close_sym(')'))
         .map(tuple_payload_type);
 
     let enum_variant = ident
@@ -127,11 +149,11 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         });
 
     let braced_enum_body = enum_variant
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .at_least(1)
         .collect::<Vec<_>>()
-        .delimited_by(sym('{'), sym('}'))
+        .delimited_by(sym('{'), close_sym('}'))
         .map(TypeExpr::Sum);
 
     let enum_def = keyword("enum")
@@ -160,10 +182,10 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         .map(|(flow, (name, ty))| Param { flow, name, ty });
 
     let params = param
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('('), sym(')'));
+        .delimited_by(sym('('), close_sym(')'));
 
     let function_def = keyword("fn")
         .ignore_then(ident.clone())
@@ -191,10 +213,10 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         .map(|(flow, (name, ty))| RawParam { flow, name, ty });
 
     let raw_params = raw_param
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(sym('('), sym(')'));
+        .delimited_by(sym('('), close_sym(')'));
 
     let method_def = keyword("fn")
         .ignore_then(ident.clone())
@@ -233,7 +255,7 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
             sig_def
                 .repeated()
                 .collect::<Vec<_>>()
-                .delimited_by(sym('{'), sym('}')),
+                .delimited_by(sym('{'), close_sym('}')),
         )
         .map(|((name, generics), methods)| {
             Item::Trait(TraitDef {
@@ -258,7 +280,7 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
             method_def
                 .repeated()
                 .collect::<Vec<_>>()
-                .delimited_by(sym('{'), sym('}')),
+                .delimited_by(sym('{'), close_sym('}')),
         )
         .try_map(|((generics, trait_ref, target), methods), span| {
             let methods = methods
@@ -283,7 +305,7 @@ fn item_parser<'src>() -> impl Parser<'src, &'src str, Item, extra::Err<Rich<'sr
         impl_def,
         trait_def,
     ))
-    .padded_by(layout())
+    .padded_by(padding())
     .boxed()
 }
 
@@ -361,10 +383,10 @@ fn type_parser<'src>()
 
         let generic_args = ty
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('<'), sym('>'));
+            .delimited_by(sym('<'), close_sym('>'));
 
         let named = ident
             .clone()
@@ -386,33 +408,33 @@ fn type_parser<'src>()
 
         let record_type_expr = named_product_field
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('{'), sym('}'))
+            .delimited_by(sym('{'), close_sym('}'))
             .map(record_type);
 
         let tuple_or_group = ty
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
             .map(tuple_or_group_type);
 
         let record_variant_payload = named_product_field
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('{'), sym('}'))
+            .delimited_by(sym('{'), close_sym('}'))
             .map(record_type);
 
         let tuple_variant_payload = ty
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('('), sym(')'))
+            .delimited_by(sym('('), close_sym(')'))
             .map(tuple_payload_type);
 
         let anonymous_enum_variant = ident
@@ -424,14 +446,14 @@ fn type_parser<'src>()
             });
 
         let anonymous_enum = anonymous_enum_variant
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .at_least(1)
             .collect::<Vec<_>>()
             .map(TypeExpr::Sum);
 
         let parenthesized =
-            choice((anonymous_enum, tuple_or_group)).delimited_by(sym('('), sym(')'));
+            choice((anonymous_enum, tuple_or_group)).delimited_by(sym('('), close_sym(')'));
 
         let atom = choice((record_type_expr, parenthesized, named));
 
@@ -444,7 +466,7 @@ fn type_parser<'src>()
                 None => input,
             })
     })
-    .padded_by(layout())
+    .padded_by(padding())
     .boxed()
 }
 
@@ -497,18 +519,18 @@ fn pattern_parser<'src>()
             });
 
         let record = record_field
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('{'), sym('}'))
+            .delimited_by(sym('{'), close_sym('}'))
             .map(Pattern::Record);
 
         let tuple = pattern
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('('), sym(')'))
+            .delimited_by(sym('('), close_sym(')'))
             .map(tuple_or_group_pattern);
 
         choice((wildcard, record, tuple, ident.map(Pattern::Name)))
@@ -554,7 +576,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .map(|(flow, (label, value))| Arg { flow, label, value });
 
         let args = arg
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(inline_sym('('), close_sym(')'))
@@ -590,7 +612,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
 
         let record_expr = record_field
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(sym('{'), close_sym('}'))
@@ -599,7 +621,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
 
         let paren_expr = expr
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(sym('('), close_sym(')'))
@@ -609,10 +631,10 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
         let match_variant = sym('.').ignore_then(ident.clone()).or(ident.clone());
         let tuple_match_payloads = pattern
             .clone()
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('('), sym(')'))
+            .delimited_by(sym('('), close_sym(')'))
             .map(tuple_or_group_pattern);
         let record_match_field = ident
             .clone()
@@ -622,19 +644,18 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
                 value: pattern.unwrap_or(Pattern::Name(name)),
             });
         let record_match_payloads = record_match_field
-            .separated_by(sym(','))
+            .separated_by(list_separator())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(sym('{'), sym('}'))
+            .delimited_by(sym('{'), close_sym('}'))
             .map(Pattern::Record);
         let match_payloads = choice((tuple_match_payloads, record_match_payloads))
             .or_not()
             .map(|payload| payload);
-        let match_separator = op("=>").or(sym(':'));
         let match_arm = match_variant
             .clone()
             .then(match_payloads)
-            .then_ignore(match_separator)
+            .then_ignore(op("=>"))
             .then(expr.clone())
             .map(|((variant, payloads), body)| MatchArm {
                 variant,
@@ -646,7 +667,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .ignore_then(expr.clone())
             .then(
                 match_arm
-                    .separated_by(sym(','))
+                    .separated_by(list_separator())
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(sym('{'), close_sym('}')),
@@ -893,11 +914,11 @@ fn is_keyword(ident: &str) -> bool {
 fn generic_params_parser<'src>()
 -> impl Parser<'src, &'src str, Vec<String>, extra::Err<Rich<'src, char>>> + Clone {
     ident_parser()
-        .separated_by(sym(','))
+        .separated_by(list_separator())
         .allow_trailing()
         .at_least(1)
         .collect::<Vec<_>>()
-        .delimited_by(sym('<'), sym('>'))
+        .delimited_by(sym('<'), close_sym('>'))
         .or_not()
         .map(Option::unwrap_or_default)
         .boxed()
@@ -978,6 +999,11 @@ fn line_separator<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'s
     padding()
         .ignore_then(newline.repeated().at_least(1).ignored())
         .then_ignore(layout())
+}
+
+fn list_separator<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone
+{
+    choice((sym(','), line_separator()))
 }
 
 fn layout<'src>() -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char>>> + Clone {

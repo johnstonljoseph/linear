@@ -1,6 +1,6 @@
 use linear::frontend::{
     Arg, BinaryOp, Block, Expr, Field, Item, LetStmt, MatchArm, Param, Pattern, Stmt, TypeExpr,
-    ValueFlow, parse_module,
+    ValueFlow, parse_module, parse_module_diagnostics,
 };
 
 #[test]
@@ -414,8 +414,8 @@ fn parses_sum_types_and_match_expressions() {
         enum MaybeU32 { none, some(U32) }
         fn or_zero(x: MaybeU32) -> U32 {
             match x {
-                .none: 0,
-                .some(value): value,
+                .none => 0,
+                .some(value) => value,
             }
         }
         "#,
@@ -463,6 +463,24 @@ fn parses_sum_types_and_match_expressions() {
 }
 
 #[test]
+fn rejects_colon_match_arm_separator() {
+    assert!(
+        parse_module(
+            r#"
+            enum MaybeU32 { none, some(U32) }
+            fn or_zero(x: MaybeU32) -> U32 {
+              match x {
+                .none: 0
+                .some(value): value
+              }
+            }
+            "#
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn parses_patterns_in_lets_and_match_payloads() {
     let module = parse_module(
         r#"
@@ -475,8 +493,8 @@ fn parses_patterns_in_lets_and_match_payloads() {
           let { left, right: renamed } = pair
           let (a, b) = (left, renamed)
           match decision {
-            .allow { reason }: a,
-            .review { queue, priority: p }: b + p,
+            .allow { reason } => a,
+            .review { queue, priority: p } => b + p,
           }
         }
         "#,
@@ -685,8 +703,8 @@ fn parses_braced_function_match_and_if_bodies() {
 
         fn or_zero(x: MaybeU32) -> U32 {
           match x {
-            .none: 0,
-            .some(value): value,
+            .none => 0,
+            .some(value) => value,
           }
         }
 
@@ -737,6 +755,83 @@ fn parses_braced_function_match_and_if_bodies() {
 }
 
 #[test]
+fn parses_newline_separated_groups_without_commas() {
+    let module = parse_module(
+        r#"
+        struct User {
+          id: U32
+          balance: U32
+        }
+
+        enum MaybePair {
+          none
+          some(
+            U32
+            U32
+          )
+        }
+
+        type Users = HashMap<
+          U32
+          User
+        >
+
+        fn choose(
+          x: U32
+          y: U32
+          take value: MaybePair
+        ) -> U32 {
+          let pair = (x
+                      y)
+          let {
+            id
+            balance
+          } = User { id: x
+                   balance: y }
+          match value {
+            .none => add(
+              id
+              balance
+            )
+            .some(
+              a
+              b
+            ) => a + b
+          }
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(module.items.len(), 4);
+    let Item::Enum(type_def) = &module.items[1] else {
+        panic!("expected enum item");
+    };
+    assert_eq!(
+        type_def.ty,
+        TypeExpr::Sum(vec![
+            Field {
+                name: Some("none".into()),
+                value: TypeExpr::Unit,
+            },
+            Field {
+                name: Some("some".into()),
+                value: TypeExpr::Product(vec![
+                    Field {
+                        name: None,
+                        value: TypeExpr::Name("U32".into()),
+                    },
+                    Field {
+                        name: None,
+                        value: TypeExpr::Name("U32".into()),
+                    },
+                ]),
+            },
+        ])
+    );
+}
+
+#[test]
 fn parses_all_bootstrap_sketches() {
     let bootstrap_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap");
     let mut parsed = 0;
@@ -752,4 +847,24 @@ fn parses_all_bootstrap_sketches() {
     }
 
     assert!(parsed >= 2);
+}
+
+#[test]
+fn parse_diagnostics_include_source_spans() {
+    let src = "fn bad(x: U32) -> U32 {\n  mut x\n}\n";
+    let errors = parse_module_diagnostics(src).unwrap_err();
+    let span = errors
+        .iter()
+        .find_map(|error| error.span)
+        .expect("expected at least one spanned parse diagnostic");
+    let line_columns = span.line_columns(src);
+
+    assert!(line_columns.start.line >= 1);
+    assert!(line_columns.start.column >= 1);
+    assert!(
+        errors.iter().any(|error| error.message.contains("mut")
+            || error.message.contains("found")
+            || error.message.contains("expected")),
+        "{errors:?}"
+    );
 }

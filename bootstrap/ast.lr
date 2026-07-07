@@ -11,9 +11,9 @@ type ItemId = U32
 type ArmId = U32
 
 enum Flow {
-  returned_unchanged,
-  returned_changed,
-  not_returned,
+  returned_unchanged
+  returned_changed
+  not_returned
 }
 
 struct TypeField { name: Option<Name>, value: TypeNodeId }
@@ -24,49 +24,49 @@ struct Arg { flow: Flow, label: Option<Name>, value: ExprNodeId }
 struct MatchArm { variant: Name, payload: Option<PatternNodeId>, body: ExprNodeId }
 
 enum TypeNode {
-  name(Name),
-  apply { name: Name, args: Vector<TypeNodeId> },
-  product(Vector<TypeField>),
-  sum(Vector<TypeField>),
-  function { input: TypeNodeId, output: TypeNodeId },
+  name(Name)
+  apply { name: Name, args: Vector<TypeNodeId> }
+  product(Vector<TypeField>)
+  sum(Vector<TypeField>)
+  function { input: TypeNodeId, output: TypeNodeId }
 }
 
 enum BinaryOp {
-  add,
-  sub,
-  mul,
-  div,
-  eq,
-  not_eq,
-  lt,
-  lte,
-  gt,
-  gte,
+  add
+  sub
+  mul
+  div
+  eq
+  not_eq
+  lt
+  lte
+  gt
+  gte
 }
 
 enum PatternNode {
-  name(Name),
-  wildcard,
-  unit,
-  tuple(Vector<PatternNodeId>),
-  record(Vector<PatternField>),
+  name(Name)
+  wildcard
+  unit
+  tuple(Vector<PatternNodeId>)
+  record(Vector<PatternField>)
 }
 
 struct Block { lets: Vector<LetStmt>, result: Option<ExprNodeId> }
 struct LetStmt { pattern: PatternNodeId, ty: Option<TypeNodeId>, value: ExprNodeId }
 
 enum ExprNode {
-  name(Name),
-  int(U32),
-  string(Text),
-  unit,
-  block(Block),
-  product(Vector<ExprField>),
-  call { callee: ExprNodeId, args: Vector<Arg> },
-  method_call { receiver: ExprNodeId, receiver_flow: Flow, method: Name, args: Vector<Arg> },
-  match_expr { scrutinee: ExprNodeId, arms: Vector<ArmId> },
-  if_expr { condition: ExprNodeId, then_branch: Block, else_branch: Block },
-  binary { lhs: ExprNodeId, op: BinaryOp, rhs: ExprNodeId },
+  name(Name)
+  int(U32)
+  string(Text)
+  unit
+  block(Block)
+  product(Vector<ExprField>)
+  call { callee: ExprNodeId, args: Vector<Arg> }
+  method_call { receiver: ExprNodeId, receiver_flow: Flow, method: Name, args: Vector<Arg> }
+  match_expr { scrutinee: ExprNodeId, arms: Vector<ArmId> }
+  if_expr { condition: ExprNodeId, then_branch: Block, else_branch: Block }
+  binary { lhs: ExprNodeId, op: BinaryOp, rhs: ExprNodeId }
 }
 
 struct TypeDef { name: Name, generics: Vector<Name>, ty: TypeNodeId, capabilities: Vector<Name> }
@@ -77,46 +77,46 @@ struct ImplBlock { generics: Vector<Name>, trait_ref: Option<TypeNodeId>, target
 struct TraitDef { name: Name, generics: Vector<Name>, methods: Vector<FunctionSig> }
 
 enum Item {
-  type_item(TypeDef),
-  struct_item(TypeDef),
-  enum_item(TypeDef),
-  global_item(GlobalDef),
-  function_item(FunctionDef),
-  impl_item(ImplBlock),
-  trait_item(TraitDef),
+  type_item(TypeDef)
+  struct_item(TypeDef)
+  enum_item(TypeDef)
+  global_item(GlobalDef)
+  function_item(FunctionDef)
+  impl_item(ImplBlock)
+  trait_item(TraitDef)
 }
 
 struct AstModule {
-  items: Vector<ItemId>,
-  type_nodes: HashMap<TypeNodeId, TypeNode>,
-  expr_nodes: HashMap<ExprNodeId, ExprNode>,
-  pattern_nodes: HashMap<PatternNodeId, PatternNode>,
-  match_arms: HashMap<ArmId, MatchArm>,
-  item_nodes: HashMap<ItemId, Item>,
+  items: Vector<ItemId>
+  type_nodes: HashMap<TypeNodeId, TypeNode>
+  expr_nodes: HashMap<ExprNodeId, ExprNode>
+  pattern_nodes: HashMap<PatternNodeId, PatternNode>
+  match_arms: HashMap<ArmId, MatchArm>
+  item_nodes: HashMap<ItemId, Item>
 }
 
 fn flow_is_sunk(flow: Flow) -> Bool {
   match flow {
-    .returned_unchanged: false,
-    .returned_changed: false,
-    .not_returned: true,
+    .returned_unchanged => false
+    .returned_changed => false
+    .not_returned => true
   }
 }
 
 fn expr_is_leaf(module: AstModule, id: ExprNodeId) -> Bool {
   let node = module.expr_nodes.get_or(id, ExprNode.unit)
   match node {
-    .name(name_value): true,
-    .int(value): true,
-    .string(value): true,
-    .unit: true,
-    .block(block_value): false,
-    .product(fields): false,
-    .call { callee, args }: false,
-    .method_call { receiver, receiver_flow, method, args }: false,
-    .match_expr { scrutinee, arms }: false,
-    .if_expr { condition, then_branch, else_branch }: false,
-    .binary { lhs, op, rhs }: false,
+    .name(name_value) => true
+    .int(value) => true
+    .string(value) => true
+    .unit => true
+    .block(block_value) => false
+    .product(fields) => false
+    .call { callee, args } => false
+    .method_call { receiver, receiver_flow, method, args } => false
+    .match_expr { scrutinee, arms } => false
+    .if_expr { condition, then_branch, else_branch } => false
+    .binary { lhs, op, rhs } => false
   }
 }
 

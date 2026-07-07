@@ -482,8 +482,6 @@ pub enum CoreError {
     NotSymbol(TypeId),
     NotText(TypeId),
     NotFunction(TypeId),
-    NotList(TypeId),
-    NotHashMap(TypeId),
     BadVariant {
         ty: TypeId,
         variant: usize,
@@ -511,14 +509,11 @@ pub enum BuiltinOp {
     FiniteMul { ty: TypeId },
     FiniteEq { ty: TypeId, bool_ty: TypeId },
     FiniteLt { ty: TypeId, bool_ty: TypeId },
-    ListEmpty { list_ty: TypeId },
-    ListPush { list_ty: TypeId },
-    ListLen { list_ty: TypeId, size_ty: TypeId },
-    ListGet { list_ty: TypeId, index_ty: TypeId },
-    HashMapEmpty { map_ty: TypeId },
-    HashMapInsert { map_ty: TypeId },
-    HashMapGetOr { map_ty: TypeId },
-    HashMapContains { map_ty: TypeId, bool_ty: TypeId },
+    /// Toy update-style builtin: consumes a finite value and returns the next
+    /// value modulo the type's cardinality, as a changed version. It exists so
+    /// value-flow checking has an axiomatic "output is not the same version"
+    /// primitive to recurse to until real update builtins land.
+    FiniteNext { ty: TypeId },
 }
 
 impl From<TypeError> for CoreError {
@@ -834,48 +829,10 @@ impl<'a> FunctionChecker<'a> {
                 self.consume_args(args, &[*ty, *ty])?;
                 Ok(vec![*ty, *ty, *bool_ty])
             }
-            BuiltinOp::ListEmpty { list_ty } => {
-                list_element(self.types, *list_ty)?;
-                self.consume_args(args, &[])?;
-                Ok(vec![*list_ty])
-            }
-            BuiltinOp::ListPush { list_ty } => {
-                let element = list_element(self.types, *list_ty)?;
-                self.consume_args(args, &[*list_ty, element])?;
-                Ok(vec![*list_ty])
-            }
-            BuiltinOp::ListLen { list_ty, size_ty } => {
-                list_element(self.types, *list_ty)?;
-                finite_cardinality(self.types, *size_ty)?;
-                self.consume_args(args, &[*list_ty])?;
-                Ok(vec![*list_ty, *size_ty])
-            }
-            BuiltinOp::ListGet { list_ty, index_ty } => {
-                let element = list_element(self.types, *list_ty)?;
-                finite_cardinality(self.types, *index_ty)?;
-                self.consume_args(args, &[*list_ty, *index_ty])?;
-                Ok(vec![*list_ty, element])
-            }
-            BuiltinOp::HashMapEmpty { map_ty } => {
-                hashmap_parts(self.types, *map_ty)?;
-                self.consume_args(args, &[])?;
-                Ok(vec![*map_ty])
-            }
-            BuiltinOp::HashMapInsert { map_ty } => {
-                let (key, value) = hashmap_parts(self.types, *map_ty)?;
-                self.consume_args(args, &[*map_ty, key, value])?;
-                Ok(vec![*map_ty])
-            }
-            BuiltinOp::HashMapGetOr { map_ty } => {
-                let (key, value) = hashmap_parts(self.types, *map_ty)?;
-                self.consume_args(args, &[*map_ty, key, value])?;
-                Ok(vec![*map_ty, value])
-            }
-            BuiltinOp::HashMapContains { map_ty, bool_ty } => {
-                let (key, _) = hashmap_parts(self.types, *map_ty)?;
-                validate_bool_type(self.types, *bool_ty)?;
-                self.consume_args(args, &[*map_ty, key])?;
-                Ok(vec![*map_ty, *bool_ty])
+            BuiltinOp::FiniteNext { ty } => {
+                finite_cardinality(self.types, *ty)?;
+                self.consume_args(args, &[*ty])?;
+                Ok(vec![*ty])
             }
         }
     }
@@ -985,20 +942,6 @@ fn validate_bool_type(types: &TypeStore, id: TypeId) -> Result<(), CoreError> {
             Ok(())
         }
         _ => Err(CoreError::NotSum(id)),
-    }
-}
-
-fn list_element(types: &TypeStore, id: TypeId) -> Result<TypeId, CoreError> {
-    match type_kind(types, id)? {
-        TypeKind::List { element, .. } => Ok(*element),
-        _ => Err(CoreError::NotList(id)),
-    }
-}
-
-fn hashmap_parts(types: &TypeStore, id: TypeId) -> Result<(TypeId, TypeId), CoreError> {
-    match type_kind(types, id)? {
-        TypeKind::HashMap { key, value, .. } => Ok((*key, *value)),
-        _ => Err(CoreError::NotHashMap(id)),
     }
 }
 

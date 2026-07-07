@@ -58,16 +58,13 @@ already defined. This excludes ordinary inductive encodings such as:
 List<T> = Unit + (T * List<T>)
 ```
 
-Collections are therefore primitive types, described separately below.
+Collections will therefore be primitive type families; they are currently
+removed from the scaffold pending redesign (see Collections below).
 
-The current Rust scaffold also has primitive `Symbol`, `Text`, ordered
-`List<T>`/`Vector<T>`, `HashMap<K, V>`, and named opaque primitive types.
-`Symbol`, `Text`, finite types, function types, `Unit`, and `Never` support
-explicit `Dup` and `Zap`. Collections come in two kinds:
-
-- immutable collections, whose `Dup`/`Zap` capabilities are derived
-  structurally from their contents;
-- mutable collections, which are linear even when their contents are copyable.
+The current Rust scaffold also has primitive `Symbol`, `Text`, and named
+opaque primitive types (including a builtin linear `Token`). `Symbol`,
+`Text`, finite types, function types, `Unit`, and `Never` support explicit
+`Dup` and `Zap`.
 
 Function types are inhabited only by global function identifiers. Function types
 are unary `A -> B`; multi-input or multi-output core functions are represented
@@ -204,18 +201,37 @@ is computed from another copy. This metadata supports surface sugars and docs.
 
 ## Version Metadata
 
-Functions can carry metadata describing how outputs relate to inputs:
+Functions carry metadata describing how outputs relate to inputs:
 
 - output `o` is the same version of input `i`;
 - output `o` is an updated version of input `i`;
 - output `o` is derived from input `i`;
 - input `i` is consumed/sunk and not returned.
 
-The compiler should infer this metadata by following definitions down to base
-built-in operations. Built-ins declare the metadata axiomatically.
+The first slice of this is implemented in `src/flow.rs` as same-version
+inference. Every core output slot is classified as either provably the same
+version of one input, or unproven. Builtins declare their flow axiomatically:
+finite arithmetic/comparison ops return both operands unchanged, `dup` gives
+both copies the source version, `next` returns a changed version. Function
+summaries are inferred bottom-up over the call graph with a fixpoint, so
+recursion and mutual recursion converge; a path that never terminates
+constrains nothing and satisfies any contract vacuously.
 
-This metadata is not required for type soundness. It is for diagnostics,
-documentation, surface sugar, and optimization.
+Frontend flow markers are checked against these summaries after body lowering:
+
+- an unmarked (borrow) parameter whose hidden output slot is not provably the
+  same version is a hard error;
+- a `mut` parameter whose slot is provably the same version on every path is
+  reported as actually being a borrow (a warning, not an error, until surface
+  code can express real updates);
+- a `take` parameter whose exact version provably escapes into any output is
+  reported as moved-through rather than taken; consumption itself is already
+  enforced by linearity.
+
+Same-version tracking is currently whole-value: projecting a field and
+reassembling the identical parts is not yet recognized as the same version.
+That path-sensitive extension is what the planned borrow/plug (one-hole
+context) design will need, and it slots into the same lattice.
 
 ## Products And Projection
 
@@ -331,45 +347,29 @@ requires an explicit sum type over the finite cases.
 
 ## Collections
 
-Recursive user types are banned, so collections are primitive families. The
-initial implemented collection families are:
+Collections have been removed from the scaffold while they are redesigned.
+The previous primitive `List`/`HashMap` families, their builtins, and the
+extractive read semantics are gone; nothing in the core references them.
 
-- `List<T>` / `Vector<T>`;
-- `HashMap<K, V>`.
+The redesign direction is recorded in the working discussion: immutable
+collections observe (path reads that duplicate only `Dup` leaves) or are
+consumed; extraction and substitution live on mutable collections; take-apart
+operations return the part plus a one-hole context (the type derivative), and
+reassembly is `plug`, with product projection/insertion as the static-address
+special case. Same-version flow metadata is the mechanism that will make
+read-only plugging checkable.
 
-Collection operations are ordinary linear functions at the semantic boundary:
-an operation consumes a collection/root/builder and returns the next version
-when appropriate.
+Until then, the only builtins are scalar:
 
-This is true for both collection kinds. For immutable collections, an update
-operation returns a new immutable value. For mutable collections, the same
-shape represents the next version of the unique mutable handle. The evaluator
-uses the same runtime representation for both; the distinction is type-level
-and later metadata/lowering can use it.
+- finite arithmetic and comparisons: `add`, `sub`, `mul`, `eq`, `lt`, all
+  observer-style (operands are returned unchanged before the visible result);
+- `next`, a toy update builtin that consumes a finite value and returns a
+  changed version (+1 modulo the cardinality). It exists so value-flow
+  checking has an axiomatic "changed" primitive to recurse to until real
+  update builtins land.
 
-The current built-ins are:
-
-- finite arithmetic and comparisons: `add`, `sub`, `mul`, `eq`, `lt`;
-- list: `empty`, `push`, `len`, `get`;
-- hashmap: `empty`, `insert`, `get_or`, `contains`.
-
-Finite arithmetic and comparison builtins are observer-style operations: they
-consume both operands and return both operands unchanged, followed by the
-visible result. For example, finite `add` has core result shape
-`(lhs, rhs, sum)`, and finite `lt` has result shape `(lhs, rhs, bool)`.
-
-Read-like operations are extractive. For example, `ListGet` consumes
-`list, index` and returns `list, element`, where the returned list is the
-residual collection with the element moved out. `HashMapGetOr` likewise returns
-the residual map and the moved-out or default value. The residual has the same
-surface/core type as the original collection; any hole or deletion bookkeeping
-is a collection-builtin/backend responsibility, not a user-visible type.
-
-Because elements are moved out, these operations do not require element/value
-`Dup`. If a program wants both the extracted element and a restored equivalent
-collection, it must explicitly duplicate the element, then reinsert one copy.
-
-Built-in collection operations will declare version metadata axiomatically.
+There is also a builtin `Token` primitive type with neither `Dup` nor `Zap`,
+so surface programs can exercise strict linearity without collections.
 
 ## Evaluation
 
@@ -382,9 +382,8 @@ The evaluator currently supports:
 - direct and recursive function calls, with a step limit;
 - static function values and dynamic calls through function values;
 - global definitions;
-- finite arithmetic and comparisons;
-- products, sums, exhaustive matching, `dup`, and `zap`;
-- lists/vectors and hashmaps.
+- finite arithmetic, comparisons, and `next`;
+- products, sums, exhaustive matching, `dup`, and `zap`.
 
 Finite arithmetic is modular over the finite type cardinality. Boolean visible
 results are represented as a two-variant sum over `Unit`, with variant `0` as
@@ -416,28 +415,12 @@ the same optimization quality.
 
 ## Collection Building
 
-Building primitive collections requires primitive construction APIs. The
-preferred model is a linear builder:
-
-```text
-new_builder : Unit -> Builder<C>
-yield       : Builder<C> * Item -> Builder<C>
-finish      : Builder<C> -> C
-```
-
-Surface syntax may provide:
-
-```text
-build List<Int> {
-  yield 1
-  yield 2
-}
-```
-
-which lowers to builder operations.
-
-Unfold/co-recursive style builders may be added as intent nodes, but builder
-values are the minimal semantic mechanism.
+(Pending the collections redesign.) The earlier sketch remains the baseline:
+building goes through linear builder values (`new_builder` / `yield` /
+`finish`), with `collect` defined as a fold over builder operations so a type
+has `collect` exactly when it has a builder. Whether builders are a restricted
+mode of mutable collections plus a `freeze`, and whether reads during build
+are permitted, are open questions tracked in the redesign.
 
 ## Open Questions
 

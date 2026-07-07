@@ -9,8 +9,8 @@ type Users = HashMap<UserId, User>
 type Audit = Vector<Text>
 
 enum UserEvent {
-  created { id: UserId, initial_balance: Balance },
-  updated { id: UserId, delta: Balance },
+  created { id: UserId, initial_balance: Balance }
+  updated { id: UserId, delta: Balance }
 }
 
 impl User {

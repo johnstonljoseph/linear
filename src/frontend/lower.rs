@@ -7,14 +7,14 @@ use crate::core::{
 };
 use crate::frontend::{
     Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, LetStmt,
-    MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, Stmt, TypeExpr,
+    MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, Stmt, TypeDef, TypeExpr,
     ValueFlow,
 };
 use crate::id::{FunctionId, GlobalId, ValueId};
-use crate::types::{
-    CollectionMutability, Component, ComponentName, DeclaredCapabilities, TypeError, TypeKind,
-    TypeStore,
+use crate::flow::{
+    FlowViolation, FunctionFlow, ParamContract, check_function_contract, infer_function_flows,
 };
+use crate::types::{Component, ComponentName, DeclaredCapabilities, TypeError, TypeKind, TypeStore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoweredTypes {
@@ -28,6 +28,9 @@ pub struct LoweredModule {
     pub globals: Vec<LoweredGlobal>,
     pub functions: Vec<LoweredFunction>,
     pub methods: Vec<LoweredMethod>,
+    /// Non-fatal marker findings from value-flow verification, currently
+    /// `mut` parameters that are provably returned unchanged on every path.
+    pub flow_warnings: Vec<FlowViolation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +73,13 @@ pub enum LowerError {
     UnsupportedGenericDecl {
         name: String,
     },
+    DuplicateGenericParam {
+        name: String,
+        param: String,
+    },
+    RecursiveGenericType {
+        name: String,
+    },
     UnknownType(String),
     BadGenericArity {
         name: String,
@@ -107,6 +117,7 @@ pub enum LowerError {
         actual: ValueFlow,
     },
     ExpectedNameForReturnedArgument,
+    Flow(FlowViolation),
     DuplicateLinearUse(String),
     ValueMovedDuringExpression(String),
     DeadLinearLocal {
@@ -163,12 +174,83 @@ pub fn lower_module_bodies(module: &Module) -> Result<LoweredModule, LowerError>
     }
 
     lowered.program.check(&lowered.types)?;
+
+    let flows = infer_function_flows(&lowered.program);
+    let mut warnings = Vec::new();
+    for function in &lowered.functions {
+        verify_marker_contracts(function, &flows, &mut warnings)?;
+    }
+    for method in &lowered.methods {
+        verify_marker_contracts(&method.function, &flows, &mut warnings)?;
+    }
+    lowered.flow_warnings = warnings;
+
     Ok(lowered)
+}
+
+/// Compare one function's declared flow markers against its inferred value
+/// flow. Unproven borrows are hard errors; `mut` parameters that provably
+/// never change are collected as warnings.
+fn verify_marker_contracts(
+    function: &LoweredFunction,
+    flows: &HashMap<FunctionId, FunctionFlow>,
+    warnings: &mut Vec<FlowViolation>,
+) -> Result<(), LowerError> {
+    let Some(flow) = flows.get(&function.id) else {
+        return Ok(());
+    };
+    let params = function
+        .params
+        .iter()
+        .map(|param| {
+            let contract = match param.flow {
+                ValueFlow::ReturnedUnchanged => ParamContract::Borrowed,
+                ValueFlow::ReturnedChanged => ParamContract::Updated,
+                ValueFlow::NotReturned => ParamContract::Consumed,
+            };
+            (param.name.clone(), contract)
+        })
+        .collect::<Vec<_>>();
+    for violation in check_function_contract(&function.name, &params, flow) {
+        match violation {
+            FlowViolation::BorrowNotProven { .. } => {
+                return Err(LowerError::Flow(violation));
+            }
+            FlowViolation::MutIsBorrow { .. } | FlowViolation::TakeIsBorrow { .. } => {
+                warnings.push(violation)
+            }
+        }
+    }
+    Ok(())
 }
 
 struct TypeLowerer {
     types: TypeStore,
     anonymous: HashMap<AnonymousTypeKey, TypeId>,
+    generic_defs: HashMap<String, GenericTypeDef>,
+    generic_instantiations: HashMap<GenericTypeKey, TypeId>,
+    generic_in_progress: Vec<GenericTypeKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GenericTypeDef {
+    kind: GenericTypeKind,
+    generics: Vec<String>,
+    ty: TypeExpr,
+    capabilities: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenericTypeKind {
+    Alias,
+    Struct,
+    Enum,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GenericTypeKey {
+    name: String,
+    args: Vec<TypeId>,
 }
 
 impl TypeLowerer {
@@ -180,6 +262,10 @@ impl TypeLowerer {
         types.add_uint("U64", 64)?;
         types.add_symbol("Symbol")?;
         types.add_text("Text")?;
+        // Toy linear resource type. It gives the surface language a type with
+        // neither Dup nor Zap while the real linear builtins (collections,
+        // handles) are being redesigned.
+        types.add_primitive("Token", DeclaredCapabilities::linear())?;
 
         let unit = types.unit();
         types.add_sum(
@@ -194,6 +280,9 @@ impl TypeLowerer {
         Ok(Self {
             types,
             anonymous: HashMap::new(),
+            generic_defs: HashMap::new(),
+            generic_instantiations: HashMap::new(),
+            generic_in_progress: Vec::new(),
         })
     }
 
@@ -201,43 +290,87 @@ impl TypeLowerer {
         for item in &module.items {
             match item {
                 Item::Type(type_def) => {
-                    reject_generics(&type_def.name, &type_def.generics)?;
                     reject_alias_capabilities(&type_def.name, &type_def.capabilities)?;
-                    let ty = self.lower_type_expr(&type_def.ty)?;
-                    self.types.add_alias(type_def.name.clone(), ty)?;
+                    if type_def.generics.is_empty() {
+                        self.ensure_type_name_unused(&type_def.name)?;
+                        let ty = self.lower_type_expr(&type_def.ty)?;
+                        self.types.add_alias(type_def.name.clone(), ty)?;
+                    } else {
+                        self.add_generic_type_def(GenericTypeKind::Alias, type_def)?;
+                    }
                 }
                 Item::Struct(type_def) => {
-                    reject_generics(&type_def.name, &type_def.generics)?;
-                    let declared = declared_capabilities(&type_def.capabilities)?;
-                    let fields = match &type_def.ty {
-                        TypeExpr::Product(fields) => self.lower_components(fields)?,
-                        TypeExpr::Unit => Vec::new(),
-                        _ => {
-                            return Err(LowerError::ExpectedStructBody {
-                                name: type_def.name.clone(),
-                            });
-                        }
-                    };
-                    self.types
-                        .add_product(Some(type_def.name.clone()), fields, declared)?;
+                    if type_def.generics.is_empty() {
+                        self.ensure_type_name_unused(&type_def.name)?;
+                        let declared = declared_capabilities(&type_def.capabilities)?;
+                        let fields = match &type_def.ty {
+                            TypeExpr::Product(fields) => self.lower_components(fields)?,
+                            TypeExpr::Unit => Vec::new(),
+                            _ => {
+                                return Err(LowerError::ExpectedStructBody {
+                                    name: type_def.name.clone(),
+                                });
+                            }
+                        };
+                        self.types
+                            .add_product(Some(type_def.name.clone()), fields, declared)?;
+                    } else {
+                        self.add_generic_type_def(GenericTypeKind::Struct, type_def)?;
+                    }
                 }
                 Item::Enum(type_def) => {
-                    reject_generics(&type_def.name, &type_def.generics)?;
-                    let declared = declared_capabilities(&type_def.capabilities)?;
-                    let variants = match &type_def.ty {
-                        TypeExpr::Sum(variants) => self.lower_components(variants)?,
-                        _ => {
-                            return Err(LowerError::ExpectedEnumBody {
-                                name: type_def.name.clone(),
-                            });
-                        }
-                    };
-                    self.types
-                        .add_sum(Some(type_def.name.clone()), variants, declared)?;
+                    if type_def.generics.is_empty() {
+                        self.ensure_type_name_unused(&type_def.name)?;
+                        let declared = declared_capabilities(&type_def.capabilities)?;
+                        let variants = match &type_def.ty {
+                            TypeExpr::Sum(variants) => self.lower_components(variants)?,
+                            _ => {
+                                return Err(LowerError::ExpectedEnumBody {
+                                    name: type_def.name.clone(),
+                                });
+                            }
+                        };
+                        self.types
+                            .add_sum(Some(type_def.name.clone()), variants, declared)?;
+                    } else {
+                        self.add_generic_type_def(GenericTypeKind::Enum, type_def)?;
+                    }
                 }
                 Item::Global(_) | Item::Function(_) | Item::Impl(_) | Item::Trait(_) => {}
             }
         }
+        Ok(())
+    }
+
+    fn ensure_type_name_unused(&self, name: &str) -> Result<(), LowerError> {
+        if self.generic_defs.contains_key(name) {
+            Err(LowerError::Type(TypeError::DuplicateName(name.to_owned())))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn add_generic_type_def(
+        &mut self,
+        kind: GenericTypeKind,
+        type_def: &TypeDef,
+    ) -> Result<(), LowerError> {
+        self.ensure_type_name_unused(&type_def.name)?;
+        if self.types.type_id(&type_def.name).is_some() {
+            return Err(LowerError::Type(TypeError::DuplicateName(
+                type_def.name.clone(),
+            )));
+        }
+        reject_duplicate_generics(&type_def.name, &type_def.generics)?;
+        self.generic_defs.insert(
+            type_def.name.clone(),
+            GenericTypeDef {
+                kind,
+                generics: type_def.generics.clone(),
+                ty: type_def.ty.clone(),
+                capabilities: type_def.capabilities.clone(),
+            },
+        );
         Ok(())
     }
 
@@ -303,6 +436,7 @@ impl TypeLowerer {
             globals,
             functions,
             methods,
+            flow_warnings: Vec::new(),
         })
     }
 
@@ -367,80 +501,173 @@ impl TypeLowerer {
     }
 
     fn lower_type_expr(&mut self, ty: &TypeExpr) -> Result<TypeId, LowerError> {
+        self.lower_type_expr_env(ty, &HashMap::new())
+    }
+
+    fn lower_type_expr_env(
+        &mut self,
+        ty: &TypeExpr,
+        generic_env: &HashMap<String, TypeId>,
+    ) -> Result<TypeId, LowerError> {
         match ty {
             TypeExpr::Unit => Ok(self.types.unit()),
-            TypeExpr::Name(name) => self
-                .types
-                .type_id(name)
-                .ok_or_else(|| LowerError::UnknownType(name.clone())),
-            TypeExpr::Apply { name, args } => self.lower_type_apply(name, args),
+            TypeExpr::Name(name) => {
+                if let Some(ty) = generic_env.get(name) {
+                    return Ok(*ty);
+                }
+                if let Some(ty) = self.types.type_id(name) {
+                    return Ok(ty);
+                }
+                if let Some(def) = self.generic_defs.get(name) {
+                    return Err(LowerError::BadGenericArity {
+                        name: name.clone(),
+                        expected: def.generics.len(),
+                        actual: 0,
+                    });
+                }
+                Err(LowerError::UnknownType(name.clone()))
+            }
+            TypeExpr::Apply { name, args } => self.lower_type_apply(name, args, generic_env),
             TypeExpr::Product(fields) => {
-                let components = self.lower_components(fields)?;
+                let components = self.lower_components_env(fields, generic_env)?;
                 self.intern_anonymous(AnonymousTypeKey::Product(components))
             }
             TypeExpr::Sum(variants) => {
-                let components = self.lower_components(variants)?;
+                let components = self.lower_components_env(variants, generic_env)?;
                 self.intern_anonymous(AnonymousTypeKey::Sum(components))
             }
             TypeExpr::Function { input, output } => {
-                let input = self.lower_type_expr(input)?;
-                let output = self.lower_type_expr(output)?;
+                let input = self.lower_type_expr_env(input, generic_env)?;
+                let output = self.lower_type_expr_env(output, generic_env)?;
                 self.intern_anonymous(AnonymousTypeKey::Function { input, output })
             }
         }
     }
 
-    fn lower_type_apply(&mut self, name: &str, args: &[TypeExpr]) -> Result<TypeId, LowerError> {
-        match name {
-            "List" | "Vector" | "Vec" => {
-                let [element] = expect_arity(name, args, 1)?;
-                let element = self.lower_type_expr(element)?;
-                self.intern_anonymous(AnonymousTypeKey::List {
-                    element,
-                    mutability: CollectionMutability::Immutable,
-                })
+    fn lower_type_apply(
+        &mut self,
+        name: &str,
+        args: &[TypeExpr],
+        generic_env: &HashMap<String, TypeId>,
+    ) -> Result<TypeId, LowerError> {
+        if let Some(expected) = self.generic_defs.get(name).map(|def| def.generics.len()) {
+            if args.len() != expected {
+                return Err(LowerError::BadGenericArity {
+                    name: name.to_owned(),
+                    expected,
+                    actual: args.len(),
+                });
             }
-            "MutList" | "MutableList" | "MutVector" | "MutableVector" | "MutVec" => {
-                let [element] = expect_arity(name, args, 1)?;
-                let element = self.lower_type_expr(element)?;
-                self.intern_anonymous(AnonymousTypeKey::List {
-                    element,
-                    mutability: CollectionMutability::Mutable,
-                })
-            }
-            "HashMap" => {
-                let [key, value] = expect_arity(name, args, 2)?;
-                let key = self.lower_type_expr(key)?;
-                let value = self.lower_type_expr(value)?;
-                self.intern_anonymous(AnonymousTypeKey::HashMap {
-                    key,
-                    value,
-                    mutability: CollectionMutability::Immutable,
-                })
-            }
-            "MutHashMap" | "MutableHashMap" => {
-                let [key, value] = expect_arity(name, args, 2)?;
-                let key = self.lower_type_expr(key)?;
-                let value = self.lower_type_expr(value)?;
-                self.intern_anonymous(AnonymousTypeKey::HashMap {
-                    key,
-                    value,
-                    mutability: CollectionMutability::Mutable,
-                })
-            }
-            _ => Err(LowerError::UnknownType(name.to_owned())),
+            let concrete_args = args
+                .iter()
+                .map(|arg| self.lower_type_expr_env(arg, generic_env))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.instantiate_generic_type(name, concrete_args)
+        } else if self.types.type_id(name).is_some() {
+            Err(LowerError::BadGenericArity {
+                name: name.to_owned(),
+                expected: 0,
+                actual: args.len(),
+            })
+        } else {
+            Err(LowerError::UnknownType(name.to_owned()))
         }
+    }
+
+    fn instantiate_generic_type(
+        &mut self,
+        name: &str,
+        args: Vec<TypeId>,
+    ) -> Result<TypeId, LowerError> {
+        let def = self
+            .generic_defs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| LowerError::UnknownType(name.to_owned()))?;
+        if args.len() != def.generics.len() {
+            return Err(LowerError::BadGenericArity {
+                name: name.to_owned(),
+                expected: def.generics.len(),
+                actual: args.len(),
+            });
+        }
+
+        let key = GenericTypeKey {
+            name: name.to_owned(),
+            args,
+        };
+        if let Some(ty) = self.generic_instantiations.get(&key) {
+            return Ok(*ty);
+        }
+        if self.generic_in_progress.contains(&key) {
+            return Err(LowerError::RecursiveGenericType {
+                name: name.to_owned(),
+            });
+        }
+
+        let generic_env = def
+            .generics
+            .iter()
+            .cloned()
+            .zip(key.args.iter().copied())
+            .collect::<HashMap<_, _>>();
+
+        self.generic_in_progress.push(key.clone());
+        let result = match def.kind {
+            GenericTypeKind::Alias => self.lower_type_expr_env(&def.ty, &generic_env),
+            GenericTypeKind::Struct => (|| {
+                let declared = declared_capabilities(&def.capabilities)?;
+                let fields = match &def.ty {
+                    TypeExpr::Product(fields) => self.lower_components_env(fields, &generic_env)?,
+                    TypeExpr::Unit => Vec::new(),
+                    _ => {
+                        return Err(LowerError::ExpectedStructBody {
+                            name: name.to_owned(),
+                        });
+                    }
+                };
+                self.types
+                    .add_product(None, fields, declared)
+                    .map_err(LowerError::Type)
+            })(),
+            GenericTypeKind::Enum => (|| {
+                let declared = declared_capabilities(&def.capabilities)?;
+                let variants = match &def.ty {
+                    TypeExpr::Sum(variants) => self.lower_components_env(variants, &generic_env)?,
+                    _ => {
+                        return Err(LowerError::ExpectedEnumBody {
+                            name: name.to_owned(),
+                        });
+                    }
+                };
+                self.types
+                    .add_sum(None, variants, declared)
+                    .map_err(LowerError::Type)
+            })(),
+        };
+        self.generic_in_progress.pop();
+        let ty = result?;
+        self.generic_instantiations.insert(key, ty);
+        Ok(ty)
     }
 
     fn lower_components(
         &mut self,
         fields: &[Field<TypeExpr>],
     ) -> Result<Vec<Component>, LowerError> {
+        self.lower_components_env(fields, &HashMap::new())
+    }
+
+    fn lower_components_env(
+        &mut self,
+        fields: &[Field<TypeExpr>],
+        generic_env: &HashMap<String, TypeId>,
+    ) -> Result<Vec<Component>, LowerError> {
         fields
             .iter()
             .enumerate()
             .map(|(index, field)| {
-                let ty = self.lower_type_expr(&field.value)?;
+                let ty = self.lower_type_expr_env(&field.value, generic_env)?;
                 Ok(match &field.name {
                     Some(name) => Component::named(name.clone(), ty),
                     None => Component::positional(index, ty),
@@ -466,15 +693,6 @@ impl TypeLowerer {
             AnonymousTypeKey::Function { input, output } => {
                 self.types.add_function(None, input, output)?
             }
-            AnonymousTypeKey::List {
-                element,
-                mutability,
-            } => self.types.add_list(None, element, mutability)?,
-            AnonymousTypeKey::HashMap {
-                key,
-                value,
-                mutability,
-            } => self.types.add_hashmap(None, key, value, mutability)?,
         };
         self.anonymous.insert(key, id);
         Ok(id)
@@ -846,9 +1064,14 @@ impl<'a> BodyLowerer<'a> {
                 args,
             } => self.lower_method_call(receiver, *receiver_flow, method, args, expected),
             Expr::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, expected),
-            Expr::String(_) | Expr::Block(_) | Expr::If { .. } => Err(
-                LowerError::UnsupportedExpression("expression form is not lowered yet"),
-            ),
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => self.lower_if(condition, then_branch, else_branch, expected),
+            Expr::String(_) | Expr::Block(_) => Err(LowerError::UnsupportedExpression(
+                "expression form is not lowered yet",
+            )),
         }
     }
 
@@ -1454,6 +1677,93 @@ impl<'a> BodyLowerer<'a> {
         }
     }
 
+    fn lower_if(
+        &mut self,
+        condition: &Expr,
+        then_branch: &Block,
+        else_branch: &Block,
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let bool_ty = self.bool_type()?;
+        let variants = self.sum_variants(bool_ty)?;
+        let (false_variant, false_payload_ty) = find_variant(&variants, "false")
+            .ok_or_else(|| LowerError::UnknownValue("false".into()))?;
+        let (true_variant, true_payload_ty) = find_variant(&variants, "true")
+            .ok_or_else(|| LowerError::UnknownValue("true".into()))?;
+        if false_payload_ty != self.types.unit() || true_payload_ty != self.types.unit() {
+            return Err(LowerError::TypeMismatch {
+                expected: self.types.unit(),
+                actual: false_payload_ty,
+            });
+        }
+
+        let condition_name = match condition {
+            Expr::Name(name) if self.env.contains_key(name) => Some(name.clone()),
+            _ => None,
+        };
+        let condition = self.lower_expr(condition, Some(bool_ty))?;
+        if condition.ty != bool_ty {
+            return Err(LowerError::TypeMismatch {
+                expected: bool_ty,
+                actual: condition.ty,
+            });
+        }
+
+        let expected = match expected {
+            Some(expected) => Some(expected),
+            None => self.infer_if_result_type(then_branch, else_branch)?,
+        };
+        let threaded_names = self.live_names_except(condition_name.as_deref());
+        let payload_id = self.fresh_value();
+        let mut core_arms = Vec::with_capacity(2);
+
+        for (variant, branch) in [(false_variant, else_branch), (true_variant, then_branch)] {
+            let mut arm_lowerer = self.arm_lowerer(condition_name.as_deref(), payload_id);
+            arm_lowerer.push_statement(vec![], CoreExpr::Zap { value: payload_id })?;
+            let (body, returns) =
+                arm_lowerer.lower_block_returning(branch, expected, threaded_names.clone())?;
+            core_arms.push(CoreMatchArm::new(variant, payload_id, body, returns));
+        }
+
+        if let Some(name) = &condition_name {
+            self.env.remove(name);
+        }
+
+        let result_count = threaded_names.len() + usize::from(expected.is_some());
+        let result_ids = (0..result_count)
+            .map(|_| self.fresh_value())
+            .collect::<Vec<_>>();
+        self.push_statement(
+            result_ids.clone(),
+            CoreExpr::Match {
+                scrutinee: condition.id,
+                arms: core_arms,
+            },
+        )?;
+
+        for (threaded, id) in threaded_names.iter().zip(result_ids.iter().copied()) {
+            self.env.insert(
+                threaded.name.clone(),
+                LoweredValue {
+                    id,
+                    ty: threaded.ty,
+                },
+            );
+        }
+
+        if let Some(ty) = expected {
+            let id = result_ids[result_count - 1];
+            Ok(LoweredValue { id, ty })
+        } else {
+            let id = self.fresh_value();
+            self.push_statement(vec![id], CoreExpr::Unit)?;
+            Ok(LoweredValue {
+                id,
+                ty: self.types.unit(),
+            })
+        }
+    }
+
     fn arm_lowerer(&self, consumed_name: Option<&str>, payload_id: ValueId) -> BodyLowerer<'a> {
         let mut env = self.env.clone();
         if let Some(name) = consumed_name {
@@ -1617,11 +1927,21 @@ impl<'a> BodyLowerer<'a> {
         variants: &[Component],
         arms: &[FrontendMatchArm],
     ) -> Result<Option<TypeId>, LowerError> {
+        let env = self.inference_env();
+        self.infer_match_result_type_with_env(variants, arms, &env)
+    }
+
+    fn infer_match_result_type_with_env(
+        &self,
+        variants: &[Component],
+        arms: &[FrontendMatchArm],
+        base_env: &HashMap<String, TypeId>,
+    ) -> Result<Option<TypeId>, LowerError> {
         let mut inferred = None;
         for arm in arms {
             let (_, payload_ty) = find_variant(variants, &arm.variant)
                 .ok_or_else(|| LowerError::UnknownValue(arm.variant.clone()))?;
-            let mut env = self.inference_env();
+            let mut env = base_env.clone();
             if let Some(pattern) = &arm.payload {
                 self.bind_pattern_type(pattern, payload_ty, &mut env)?;
             }
@@ -1643,6 +1963,33 @@ impl<'a> BodyLowerer<'a> {
             }
         }
         Ok(inferred)
+    }
+
+    fn infer_if_result_type(
+        &self,
+        then_branch: &Block,
+        else_branch: &Block,
+    ) -> Result<Option<TypeId>, LowerError> {
+        let env = self.inference_env();
+        self.infer_if_result_type_with_env(then_branch, else_branch, &env)
+    }
+
+    fn infer_if_result_type_with_env(
+        &self,
+        then_branch: &Block,
+        else_branch: &Block,
+        env: &HashMap<String, TypeId>,
+    ) -> Result<Option<TypeId>, LowerError> {
+        let then_ty = self.infer_block_result_type_with_env(then_branch, env)?;
+        let else_ty = self.infer_block_result_type_with_env(else_branch, env)?;
+        match (then_ty, else_ty) {
+            (None, None) => Ok(None),
+            (Some(then_ty), Some(else_ty)) if then_ty == else_ty => Ok(Some(then_ty)),
+            (Some(expected), Some(actual)) => Err(LowerError::TypeMismatch { expected, actual }),
+            (Some(expected), None) | (None, Some(expected)) => {
+                Err(LowerError::MissingResult { expected })
+            }
+        }
     }
 
     fn inference_env(&self) -> HashMap<String, TypeId> {
@@ -1668,11 +2015,7 @@ impl<'a> BodyLowerer<'a> {
                 .map(Some)
                 .ok_or_else(|| LowerError::UnknownType("U32".into())),
             Expr::Unit => Ok(None),
-            Expr::Block(block) => block
-                .result
-                .as_deref()
-                .map(|result| self.infer_expr_type_with_env(result, env))
-                .unwrap_or(Ok(None)),
+            Expr::Block(block) => self.infer_block_result_type_with_env(block, env),
             Expr::Binary { lhs, op, .. } => {
                 let lhs_ty = self.infer_expr_type_with_env(lhs, env)?.ok_or_else(|| {
                     LowerError::TypeMismatch {
@@ -1702,14 +2045,48 @@ impl<'a> BodyLowerer<'a> {
                     return Ok(None);
                 };
                 let variants = self.sum_variants(scrutinee_ty)?;
-                self.infer_match_result_type(&variants, arms)
+                self.infer_match_result_type_with_env(&variants, arms, env)
             }
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.infer_if_result_type_with_env(then_branch, else_branch, env),
             Expr::String(_)
             | Expr::Product(_)
             | Expr::FieldAccess { .. }
-            | Expr::MethodCall { .. }
-            | Expr::If { .. } => Ok(None),
+            | Expr::MethodCall { .. } => Ok(None),
         }
+    }
+
+    fn infer_block_result_type_with_env(
+        &self,
+        block: &Block,
+        env: &HashMap<String, TypeId>,
+    ) -> Result<Option<TypeId>, LowerError> {
+        let mut env = env.clone();
+        for statement in &block.statements {
+            match statement {
+                Stmt::Let(let_stmt) => {
+                    let annotated = let_stmt
+                        .ty
+                        .as_ref()
+                        .map(|ty| self.resolve_existing_type(ty))
+                        .transpose()?;
+                    let inferred = self.infer_expr_type_with_env(&let_stmt.value, &env)?;
+                    let Some(ty) = annotated.or(inferred) else {
+                        continue;
+                    };
+                    self.bind_pattern_type(&let_stmt.pattern, ty, &mut env)?;
+                }
+                Stmt::Expr(_) => {}
+            }
+        }
+        block
+            .result
+            .as_deref()
+            .map(|result| self.infer_expr_type_with_env(result, &env))
+            .unwrap_or(Ok(None))
     }
 
     fn bind_pattern_type(
@@ -1823,6 +2200,12 @@ impl<'a> BodyLowerer<'a> {
         }
     }
 
+    fn bool_type(&self) -> Result<TypeId, LowerError> {
+        self.types
+            .type_id("Bool")
+            .ok_or_else(|| LowerError::UnknownType("Bool".into()))
+    }
+
     fn fresh_value(&mut self) -> ValueId {
         let id = ValueId(self.next_value);
         self.next_value += 1;
@@ -1872,19 +2255,7 @@ impl<'a> BodyLowerer<'a> {
 enum AnonymousTypeKey {
     Product(Vec<Component>),
     Sum(Vec<Component>),
-    Function {
-        input: TypeId,
-        output: TypeId,
-    },
-    List {
-        element: TypeId,
-        mutability: CollectionMutability,
-    },
-    HashMap {
-        key: TypeId,
-        value: TypeId,
-        mutability: CollectionMutability,
-    },
+    Function { input: TypeId, output: TypeId },
 }
 
 fn reject_generics(name: &str, generics: &[String]) -> Result<(), LowerError> {
@@ -1895,6 +2266,20 @@ fn reject_generics(name: &str, generics: &[String]) -> Result<(), LowerError> {
             name: name.to_owned(),
         })
     }
+}
+
+fn reject_duplicate_generics(name: &str, generics: &[String]) -> Result<(), LowerError> {
+    let mut seen = Vec::new();
+    for generic in generics {
+        if seen.contains(generic) {
+            return Err(LowerError::DuplicateGenericParam {
+                name: name.to_owned(),
+                param: generic.clone(),
+            });
+        }
+        seen.push(generic.clone());
+    }
+    Ok(())
 }
 
 fn reject_alias_capabilities(name: &str, capabilities: &[String]) -> Result<(), LowerError> {
@@ -1917,21 +2302,6 @@ fn declared_capabilities(capabilities: &[String]) -> Result<DeclaredCapabilities
         }
     }
     Ok(declared)
-}
-
-fn expect_arity<'a, const N: usize>(
-    name: &str,
-    args: &'a [TypeExpr],
-    expected: usize,
-) -> Result<&'a [TypeExpr; N], LowerError> {
-    if args.len() != expected {
-        return Err(LowerError::BadGenericArity {
-            name: name.to_owned(),
-            expected,
-            actual: args.len(),
-        });
-    }
-    Ok(args.try_into().expect("arity checked"))
 }
 
 fn build_call_signatures(lowered: &LoweredModule) -> HashMap<FunctionId, CallableSignature> {

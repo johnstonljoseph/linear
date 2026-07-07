@@ -13,11 +13,11 @@ type UserId = U32
 
 struct User { id: UserId, balance: U32 }
 struct MyInt(U32)
-struct CopyStore { users: List<U32> }: Dup + Zap
+struct CopyStore { users: (U32, U32) }: Dup + Zap
 
 enum Option<T> {
-  none,
-  some(T),
+  none
+  some(T)
 }
 
 global root: User
@@ -43,7 +43,7 @@ syntax must use parentheses or braces so the grouping is explicit.
 `Dup` and `Zap` are written like trait bounds on type declarations:
 
 ```linear
-struct CopyStore { users: List<U32> }: Dup + Zap
+struct CopyStore { users: (U32, U32) }: Dup + Zap
 enum DropEvent { item(U32) }: Zap
 ```
 
@@ -52,10 +52,11 @@ capabilities, not ordinary user traits. They change the linearity rules:
 `Dup` permits explicit duplication and `Zap` permits explicit dropping.
 
 Composite declarations may only declare capabilities they already have
-structurally. This is rejected because `MutList<U32>` is linear:
+structurally. This is rejected because the builtin `Token` primitive is
+linear:
 
 ```linear
-struct Bad { work: MutList<U32> }: Dup
+struct Bad { work: Token }: Dup
 ```
 
 Capability clauses currently lower only on nominal `struct` and `enum`
@@ -63,7 +64,7 @@ declarations. A `type` alias with a capability clause is parsed but rejected by
 lowering, because that would no longer be a plain alias:
 
 ```linear
-type Users = HashMap<UserId, User>: Dup // rejected for now
+type Small = U8: Dup // rejected for now
 ```
 
 ## Grouping
@@ -87,12 +88,24 @@ some(value)
 (left, right)
 ```
 
+Inside list-like groups, elements may be separated by newlines or commas.
+Commas are only needed when multiple elements appear on one line:
+
+```linear
+struct User {
+  id: UserId
+  balance: U32
+}
+
+struct User { id: UserId, balance: U32 }
+```
+
 ## Types
 
 Named generic types use angle brackets:
 
 ```linear
-HashMap<UserId, User>
+Box<UserId>
 ```
 
 Named products use braces. Positional products use parentheses. Function types
@@ -109,9 +122,9 @@ payload, or a named record payload.
 
 ```linear
 enum Decision {
-  allow { reason: U32 },
-  deny { reason: U32 },
-  review { queue: U32, priority: U32 },
+  allow { reason: U32 }
+  deny { reason: U32 }
+  review { queue: U32, priority: U32 }
 }
 ```
 
@@ -151,12 +164,12 @@ if x < 10 {
 }
 ```
 
-`match` arms may use `:` or `=>` as the arm separator.
+`match` arms use `=>` as the arm separator.
 
 ```linear
 match decision {
-  .allow { reason }: reason,
-  .review { queue, priority: p }: p,
+  .allow { reason } => reason
+  .review { queue, priority: p } => p
 }
 ```
 
@@ -182,9 +195,9 @@ The first semantic lowering pass handles non-generic type items:
 - nominal `struct` products;
 - nominal `enum` sums;
 - builtin finite types `U8`, `U16`, `U32`, and `U64`;
-- builtin `Bool`, `Symbol`, and `Text`;
-- collection families `List`, `Vector`/`Vec`, `MutList`/`MutVector`, `HashMap`,
-  and `MutHashMap`.
+- builtin `Bool`, `Symbol`, `Text`, and the linear `Token` primitive.
+
+Collection type families are removed pending the collections redesign.
 
 Generic declarations are parsed but rejected by this pass until monomorphization
 or another generic strategy exists.
@@ -281,10 +294,19 @@ fn update(mut state: State, config: Config, take event: Event) -> State {
 mut cache.insert(key: "latest", take value: event)
 ```
 
-This is documentation and sugar for value threading. The checker/lowerer must
-verify that the body agrees with the declared flow; current lowering makes the
-threaded return convention explicit and leaves detailed linear-use validation to
-the core checker.
+Markers are verified, not just trusted. After body lowering, value-flow
+inference (`src/flow.rs`) classifies every hidden output slot as provably the
+same version of its parameter or not, recursing through calls down to builtins
+that declare their flow axiomatically:
+
+- an unmarked parameter that is not provably returned unchanged is a hard
+  lowering error;
+- a `mut` parameter that provably never changes on any path is reported in
+  `LoweredModule::flow_warnings` as actually being a borrow (a warning until
+  surface code can express real updates);
+- a `take` parameter that provably escapes unchanged into any output is
+  reported as `TakeIsBorrow`: the value was moved through, not taken.
+  Consumption itself is already enforced by the core linearity checker.
 
 ## Open Syntax
 
