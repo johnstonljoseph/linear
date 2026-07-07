@@ -41,10 +41,10 @@ fn returned_params_are_same_version_even_when_swapped() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(
         flows[&swap].outputs,
-        vec![Provenance::Param(1), Provenance::Param(0)]
+        vec![Provenance::whole_param(1), Provenance::whole_param(0)]
     );
 
     // A swapped return is NOT a valid borrow of either parameter.
@@ -82,10 +82,10 @@ fn dup_propagates_the_source_version_to_both_copies() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(
         flows[&both].outputs,
-        vec![Provenance::Param(0), Provenance::Param(0)]
+        vec![Provenance::whole_param(0), Provenance::whole_param(0)]
     );
 }
 
@@ -114,12 +114,12 @@ fn observer_builtins_thread_operands_and_produce_fresh_results() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(
         flows[&add].outputs,
         vec![
-            Provenance::Param(0),
-            Provenance::Param(1),
+            Provenance::whole_param(0),
+            Provenance::whole_param(1),
             Provenance::Other
         ]
     );
@@ -163,7 +163,7 @@ fn finite_next_is_a_changed_version_and_satisfies_mut() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(flows[&bump].outputs, vec![Provenance::Other]);
     assert_eq!(flows[&wrapper].outputs, vec![Provenance::Other]);
 
@@ -241,10 +241,10 @@ fn same_version_composes_through_call_chains() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(
         flows[&double_swap].outputs,
-        vec![Provenance::Param(0), Provenance::Param(1)]
+        vec![Provenance::whole_param(0), Provenance::whole_param(1)]
     );
     assert!(
         check_function_contract(
@@ -343,8 +343,8 @@ fn match_joins_meet_across_arms() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
-    assert_eq!(flows[&threaded].outputs, vec![Provenance::Param(0)]);
+    let flows = infer_function_flows(&types, &program);
+    assert_eq!(flows[&threaded].outputs, vec![Provenance::whole_param(0)]);
     assert_eq!(flows[&replaced].outputs, vec![Provenance::Other]);
 }
 
@@ -371,7 +371,7 @@ fn bare_recursion_converges_and_satisfies_any_contract_vacuously() {
     assert_eq!(forever, linear::FunctionId(0));
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     // No terminating path constrains the output: Top survives the fixpoint
     // and any marker holds vacuously.
     assert_eq!(flows[&forever].outputs, vec![Provenance::Top]);
@@ -389,7 +389,7 @@ fn bare_recursion_converges_and_satisfies_any_contract_vacuously() {
 fn contract_slots_skip_consumed_params() {
     // fn f(take a, b) -> ...: the single hidden slot belongs to `b`.
     let flow = FunctionFlow {
-        outputs: vec![Provenance::Param(1)],
+        outputs: vec![Provenance::whole_param(1)],
     };
     assert!(
         check_function_contract(
@@ -438,7 +438,7 @@ fn take_params_that_escape_unchanged_are_reported() {
         .unwrap();
     program.check(&types).unwrap();
 
-    let flows = infer_function_flows(&program);
+    let flows = infer_function_flows(&types, &program);
     assert_eq!(
         check_function_contract("id", &[("x".into(), ParamContract::Consumed)], &flows[&id]),
         vec![FlowViolation::TakeIsBorrow {
@@ -458,7 +458,7 @@ fn take_params_that_escape_unchanged_are_reported() {
 
     // A take escaping into ANOTHER param's slot is also reported.
     let crossed = FunctionFlow {
-        outputs: vec![Provenance::Param(1), Provenance::Other],
+        outputs: vec![Provenance::whole_param(1), Provenance::Other],
     };
     let violations = check_function_contract(
         "f",
@@ -472,4 +472,397 @@ fn take_params_that_escape_unchanged_are_reported() {
         function: "f".into(),
         param: "gone".into(),
     }));
+}
+
+// ---- one-hole context rules: focus / plug / rebuild / reinject ----
+
+fn user_type(types: &mut TypeStore) -> (linear::TypeId, linear::TypeId, linear::TypeId) {
+    let u32_ty = types.add_uint("U32", 32).unwrap();
+    let user = types
+        .add_product(
+            Some("User".into()),
+            vec![
+                linear::Component::named("id", u32_ty),
+                linear::Component::named("balance", u32_ty),
+            ],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    // The one-hole context of User at `balance`: everything but that field.
+    let context = types
+        .add_product(
+            None,
+            vec![linear::Component::named("id", u32_ty)],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    (u32_ty, user, context)
+}
+
+#[test]
+fn focus_observe_plug_is_a_verified_borrow_of_the_whole() {
+    let mut types = TypeStore::new();
+    let (u32_ty, user, context_ty) = user_type(&mut types);
+    let unit = types.unit();
+    let bool_ty = types
+        .add_sum(
+            Some("Bool".into()),
+            vec![
+                linear::Component::named("false", unit),
+                linear::Component::named("true", unit),
+            ],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+
+    // fn low_balance(user: User) -> Bool, at core: User -> (User, Bool).
+    // Focus the balance out, observe it with `lt`, plug it back.
+    let mut program = CoreProgram::new();
+    let low_balance = program
+        .add_function(Function {
+            name: Some("low_balance".into()),
+            inputs: vec![Param::new(ValueId(0), user)],
+            outputs: vec![user, bool_ty],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1), ValueId(2)],
+                    Expr::FocusField {
+                        value: ValueId(0),
+                        field: 1,
+                        context_ty,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::FiniteLiteral {
+                        ty: u32_ty,
+                        value: 10,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(4), ValueId(5), ValueId(6)],
+                    Expr::Builtin {
+                        op: BuiltinOp::FiniteLt {
+                            ty: u32_ty,
+                            bool_ty,
+                        },
+                        args: vec![ValueId(1), ValueId(3)],
+                    },
+                ),
+                Statement::new(vec![], Expr::Zap { value: ValueId(5) }),
+                Statement::new(
+                    vec![ValueId(7)],
+                    Expr::PlugField {
+                        ty: user,
+                        field: 1,
+                        part: ValueId(4),
+                        context: ValueId(2),
+                    },
+                ),
+            ],
+            returns: vec![ValueId(7), ValueId(6)],
+        })
+        .unwrap();
+    program.check(&types).unwrap();
+
+    let flows = infer_function_flows(&types, &program);
+    assert_eq!(
+        flows[&low_balance].outputs,
+        vec![Provenance::whole_param(0), Provenance::Other]
+    );
+    // The whole function verifies as a borrow of `user`.
+    assert!(
+        check_function_contract(
+            "low_balance",
+            &[("user".into(), ParamContract::Borrowed)],
+            &flows[&low_balance],
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn split_and_rebuild_is_same_version_but_swapping_fields_is_not() {
+    let mut types = TypeStore::new();
+    let (_, user, _) = user_type(&mut types);
+    let mut program = CoreProgram::new();
+    let rebuild = program
+        .add_function(Function {
+            name: Some("rebuild".into()),
+            inputs: vec![Param::new(ValueId(0), user)],
+            outputs: vec![user],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1), ValueId(2)],
+                    Expr::SplitProduct { value: ValueId(0) },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::Product {
+                        ty: user,
+                        fields: vec![ValueId(1), ValueId(2)],
+                    },
+                ),
+            ],
+            returns: vec![ValueId(3)],
+        })
+        .unwrap();
+    // Same shape, but the two U32 fields are swapped: a different value.
+    let swapped = program
+        .add_function(Function {
+            name: Some("swapped".into()),
+            inputs: vec![Param::new(ValueId(0), user)],
+            outputs: vec![user],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1), ValueId(2)],
+                    Expr::SplitProduct { value: ValueId(0) },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::Product {
+                        ty: user,
+                        fields: vec![ValueId(2), ValueId(1)],
+                    },
+                ),
+            ],
+            returns: vec![ValueId(3)],
+        })
+        .unwrap();
+    program.check(&types).unwrap();
+
+    let flows = infer_function_flows(&types, &program);
+    assert_eq!(flows[&rebuild].outputs, vec![Provenance::whole_param(0)]);
+    assert_eq!(flows[&swapped].outputs, vec![Provenance::Other]);
+}
+
+#[test]
+fn match_and_reinject_is_same_version_and_flags_a_mislabeled_take() {
+    let mut types = TypeStore::new();
+    let u32_ty = u32_type(&mut types);
+    let unit = types.unit();
+    let maybe = types
+        .add_sum(
+            Some("Maybe".into()),
+            vec![
+                linear::Component::named("none", unit),
+                linear::Component::named("some", u32_ty),
+            ],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    let mut program = CoreProgram::new();
+    let echo = program
+        .add_function(Function {
+            name: Some("echo".into()),
+            inputs: vec![Param::new(ValueId(0), maybe)],
+            outputs: vec![maybe],
+            body: vec![Statement::new(
+                vec![ValueId(1)],
+                Expr::Match {
+                    scrutinee: ValueId(0),
+                    arms: vec![
+                        linear::MatchArm::new(
+                            0,
+                            ValueId(2),
+                            vec![Statement::new(
+                                vec![ValueId(3)],
+                                Expr::SumInject {
+                                    ty: maybe,
+                                    variant: 0,
+                                    payload: ValueId(2),
+                                },
+                            )],
+                            vec![ValueId(3)],
+                        ),
+                        linear::MatchArm::new(
+                            1,
+                            ValueId(4),
+                            vec![Statement::new(
+                                vec![ValueId(5)],
+                                Expr::SumInject {
+                                    ty: maybe,
+                                    variant: 1,
+                                    payload: ValueId(4),
+                                },
+                            )],
+                            vec![ValueId(5)],
+                        ),
+                    ],
+                },
+            )],
+            returns: vec![ValueId(1)],
+        })
+        .unwrap();
+    program.check(&types).unwrap();
+
+    let flows = infer_function_flows(&types, &program);
+    // Destructing and re-injecting every variant is the identity.
+    assert_eq!(flows[&echo].outputs, vec![Provenance::whole_param(0)]);
+    // So declaring the parameter `take` is a mislabeled move-through.
+    assert_eq!(
+        check_function_contract("echo", &[("m".into(), ParamContract::Consumed)], &flows[&echo]),
+        vec![FlowViolation::TakeIsBorrow {
+            function: "echo".into(),
+            param: "m".into(),
+        }]
+    );
+}
+
+#[test]
+fn plugging_into_a_different_nominal_type_is_not_the_same_version() {
+    let mut types = TypeStore::new();
+    let u32_ty = types.add_uint("U32", 32).unwrap();
+    let bool_ty = {
+        let unit = types.unit();
+        types
+            .add_sum(
+                Some("Bool".into()),
+                vec![
+                    linear::Component::named("false", unit),
+                    linear::Component::named("true", unit),
+                ],
+                linear::DeclaredCapabilities::linear(),
+            )
+            .unwrap()
+    };
+    // Two distinct nominal products with identical shapes.
+    let original = types
+        .add_product(
+            Some("Original".into()),
+            vec![
+                linear::Component::named("x", u32_ty),
+                linear::Component::named("flag", bool_ty),
+            ],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    let impostor = types
+        .add_product(
+            Some("Impostor".into()),
+            vec![
+                linear::Component::named("x", u32_ty),
+                linear::Component::named("flag", bool_ty),
+            ],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+    let context_ty = types
+        .add_product(
+            None,
+            vec![linear::Component::named("flag", bool_ty)],
+            linear::DeclaredCapabilities::linear(),
+        )
+        .unwrap();
+
+    let mut program = CoreProgram::new();
+    let relabel = program
+        .add_function(Function {
+            name: Some("relabel".into()),
+            inputs: vec![Param::new(ValueId(0), original)],
+            outputs: vec![impostor],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1), ValueId(2)],
+                    Expr::FocusField {
+                        value: ValueId(0),
+                        field: 0,
+                        context_ty,
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::PlugField {
+                        ty: impostor,
+                        field: 0,
+                        part: ValueId(1),
+                        context: ValueId(2),
+                    },
+                ),
+            ],
+            returns: vec![ValueId(3)],
+        })
+        .unwrap();
+    program.check(&types).unwrap();
+
+    let flows = infer_function_flows(&types, &program);
+    // Structurally identical bytes, but not the same value: different type.
+    assert_eq!(flows[&relabel].outputs, vec![Provenance::Other]);
+}
+
+#[test]
+fn focus_and_plug_compose_across_function_boundaries() {
+    let mut types = TypeStore::new();
+    let (u32_ty, user, context_ty) = user_type(&mut types);
+    let mut program = CoreProgram::new();
+    // Helper takes the user apart; the context travels back to the caller.
+    let open = program
+        .add_function(Function {
+            name: Some("open".into()),
+            inputs: vec![Param::new(ValueId(0), user)],
+            outputs: vec![u32_ty, context_ty],
+            body: vec![Statement::new(
+                vec![ValueId(1), ValueId(2)],
+                Expr::FocusField {
+                    value: ValueId(0),
+                    field: 1,
+                    context_ty,
+                },
+            )],
+            returns: vec![ValueId(1), ValueId(2)],
+        })
+        .unwrap();
+    // Caller reassembles what the helper took apart.
+    let roundtrip = program
+        .add_function(Function {
+            name: Some("roundtrip".into()),
+            inputs: vec![Param::new(ValueId(0), user)],
+            outputs: vec![user],
+            body: vec![
+                Statement::new(
+                    vec![ValueId(1), ValueId(2)],
+                    Expr::Call {
+                        function: open,
+                        args: vec![ValueId(0)],
+                    },
+                ),
+                Statement::new(
+                    vec![ValueId(3)],
+                    Expr::PlugField {
+                        ty: user,
+                        field: 1,
+                        part: ValueId(1),
+                        context: ValueId(2),
+                    },
+                ),
+            ],
+            returns: vec![ValueId(3)],
+        })
+        .unwrap();
+    program.check(&types).unwrap();
+
+    let flows = infer_function_flows(&types, &program);
+    assert_eq!(
+        flows[&open].outputs,
+        vec![
+            Provenance::Same(linear::Place {
+                param: 0,
+                path: vec![linear::PathStep::Field(1)],
+            }),
+            Provenance::Context {
+                whole: linear::Place::param(0),
+                hole: 1,
+            },
+        ]
+    );
+    // The caller's roundtrip is a verified borrow of the whole user.
+    assert_eq!(flows[&roundtrip].outputs, vec![Provenance::whole_param(0)]);
+    assert!(
+        check_function_contract(
+            "roundtrip",
+            &[("user".into(), ParamContract::Borrowed)],
+            &flows[&roundtrip],
+        )
+        .is_empty()
+    );
 }

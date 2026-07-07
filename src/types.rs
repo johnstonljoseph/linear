@@ -1,7 +1,29 @@
+//! The type arena and linear capabilities.
+//!
+//! Types are built strictly from already-existing types (an append-only
+//! arena), so recursion is impossible by construction. The foundations are
+//! `never` and `unit`; everything else is sums, products, unary function
+//! types, compact finite domains (`Finite<N>`, used for integers), the
+//! string-like primitives `Symbol`/`Text`, and named opaque primitives.
+//!
+//! # Capabilities
+//!
+//! A type may support `Dup` (explicit duplication) and/or `Zap` (explicit
+//! dropping); supporting neither makes it linear. Capabilities are
+//! *structural*: derived from components for sums and products, always
+//! present on finite/function/`Symbol`/`Text`/`unit`/`never`. A declaration
+//! may claim capabilities, but only ones the structure already has
+//! (the store rejects anything stronger on insertion) — except opaque
+//! [`TypeKind::Primitive`] types, whose declared capabilities are axiomatic.
+//! That makes primitives the only way to introduce linearity axioms, and
+//! composites can never launder them away.
+
 use std::collections::HashMap;
 
 use crate::id::TypeId;
 
+/// Append-only arena of type definitions plus a name table. `never` and
+/// `unit` are created up front.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeStore {
     types: Vec<TypeDef>,

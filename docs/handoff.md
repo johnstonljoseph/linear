@@ -300,10 +300,13 @@ inferred summary:
   somehow, but if it is provably moved through unchanged the marker should
   have been a borrow (or the function is a deliberate move-through).
 
-Same-version tracking is whole-value today. Projecting a field out of a
-product and reassembling identical parts is not yet recognized; that
-path-sensitive extension is exactly what the planned borrow/plug design needs
-and belongs in the same lattice.
+Tracking is path-sensitive: values carry provenances like "field 1 of
+parameter 0", contexts (one-hole residuals from `FocusField`) carry the place
+they came from, and the focus/plug, split/build, and match/inject round
+trips are all recognized as returning the same version of the whole. That is
+what lets a function that focuses a field out, observes it, and plugs it
+back verify as a borrow of the whole parameter — including when the
+focus happens in a helper function and the plug in the caller.
 
 ## Surface Syntax
 

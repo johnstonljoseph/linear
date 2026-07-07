@@ -1,3 +1,14 @@
+//! A reference interpreter for checked core programs.
+//!
+//! This is not the proving backend; it exists to make the semantics
+//! executable while the language is designed. It assumes the program passed
+//! `CoreProgram::check` (linearity means every environment entry is consumed
+//! by removal, so `dup` is the only clone and drop never happens silently),
+//! but it still reports malformed programs as errors rather than panicking.
+//! Recursion depth and total work are bounded by a step limit; exceeding it
+//! is the interpreter's stand-in for nontermination, which the language
+//! treats as a completeness failure for that input.
+
 use std::collections::HashMap;
 
 use crate::core::{BuiltinOp, CoreProgram, Expr, Function, GlobalExpr, MatchArm, Statement};
@@ -155,7 +166,7 @@ impl<'a> Evaluator<'a> {
                     actual,
                 }),
             },
-            Expr::ProjectProduct { value, field, .. } => match consume(env, *value)? {
+            Expr::FocusField { value, field, .. } => match consume(env, *value)? {
                 Value::Product(mut fields) => {
                     if *field >= fields.len() {
                         return Err(EvalError::IndexOutOfBounds {
@@ -171,14 +182,14 @@ impl<'a> Evaluator<'a> {
                     actual,
                 }),
             },
-            Expr::InsertProductField {
+            Expr::PlugField {
                 field,
-                field_value,
-                residual,
+                part,
+                context,
                 ..
             } => {
-                let field_value = consume(env, *field_value)?;
-                match consume(env, *residual)? {
+                let part = consume(env, *part)?;
+                match consume(env, *context)? {
                     Value::Product(mut fields) => {
                         if *field > fields.len() {
                             return Err(EvalError::IndexOutOfBounds {
@@ -186,7 +197,7 @@ impl<'a> Evaluator<'a> {
                                 len: fields.len(),
                             });
                         }
-                        fields.insert(*field, field_value);
+                        fields.insert(*field, part);
                         Ok(vec![Value::Product(fields)])
                     }
                     actual => Err(EvalError::RuntimeType {

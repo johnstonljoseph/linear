@@ -175,7 +175,7 @@ pub fn lower_module_bodies(module: &Module) -> Result<LoweredModule, LowerError>
 
     lowered.program.check(&lowered.types)?;
 
-    let flows = infer_function_flows(&lowered.program);
+    let flows = infer_function_flows(&lowered.types, &lowered.program);
     let mut warnings = Vec::new();
     for function in &lowered.functions {
         verify_marker_contracts(function, &flows, &mut warnings)?;

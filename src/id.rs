@@ -1,3 +1,7 @@
+//! Typed indices. `TypeId`/`FunctionId`/`GlobalId` index the corresponding
+//! arenas; `ValueId` names a single-assignment value inside one function.
+
+/// Index into the [`crate::types::TypeStore`] arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeId(pub u32);
 

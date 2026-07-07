@@ -957,10 +957,10 @@ fn product_projection_returns_field_and_residual() {
             outputs: vec![balance, user_without_balance],
             body: vec![Statement::new(
                 vec![ValueId(1), ValueId(2)],
-                Expr::ProjectProduct {
+                Expr::FocusField {
                     value: ValueId(0),
                     field: 1,
-                    residual_ty: user_without_balance,
+                    context_ty: user_without_balance,
                 },
             )],
             returns: vec![ValueId(1), ValueId(2)],
@@ -1014,11 +1014,11 @@ fn product_insert_reassembles_field_and_residual() {
             outputs: vec![user],
             body: vec![Statement::new(
                 vec![ValueId(2)],
-                Expr::InsertProductField {
+                Expr::PlugField {
                     ty: user,
                     field: 1,
-                    field_value: ValueId(0),
-                    residual: ValueId(1),
+                    part: ValueId(0),
+                    context: ValueId(1),
                 },
             )],
             returns: vec![ValueId(2)],
@@ -1069,10 +1069,10 @@ fn product_projection_rejects_wrong_residual_shape() {
             outputs: vec![balance, wrong_residual],
             body: vec![Statement::new(
                 vec![ValueId(1), ValueId(2)],
-                Expr::ProjectProduct {
+                Expr::FocusField {
                     value: ValueId(0),
                     field: 1,
-                    residual_ty: wrong_residual,
+                    context_ty: wrong_residual,
                 },
             )],
             returns: vec![ValueId(1), ValueId(2)],
@@ -1084,7 +1084,7 @@ fn product_projection_rejects_wrong_residual_shape() {
         Err(CoreError::BadProductResidual {
             product: user,
             field: 1,
-            residual: wrong_residual,
+            context: wrong_residual,
         })
     );
 }
@@ -1115,10 +1115,10 @@ fn product_projection_rejects_bad_field_index() {
             outputs: vec![token, empty_residual],
             body: vec![Statement::new(
                 vec![ValueId(1), ValueId(2)],
-                Expr::ProjectProduct {
+                Expr::FocusField {
                     value: ValueId(0),
                     field: 1,
-                    residual_ty: empty_residual,
+                    context_ty: empty_residual,
                 },
             )],
             returns: vec![ValueId(1), ValueId(2)],

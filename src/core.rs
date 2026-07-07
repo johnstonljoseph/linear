@@ -1,8 +1,58 @@
+//! The semantic core: a small linear IR that all surface syntax lowers into.
+//!
+//! # The model
+//!
+//! A [`CoreProgram`] is a set of functions plus non-function globals. A
+//! [`Function`] body is a list of single-assignment [`Statement`]s: each
+//! statement evaluates one [`Expr`] and binds its results to fresh
+//! [`ValueId`]s, and the function ends by returning a list of ids. There is
+//! no other control flow; branching is the [`Expr::Match`] expression, whose
+//! arms are blocks of the same shape.
+//!
+//! Values are linear: every id is defined once and consumed exactly once —
+//! by an expression that uses it, by being returned, or by an explicit
+//! [`Expr::Zap`]. Copying is the explicit [`Expr::Dup`]. Both are gated by
+//! the type's capabilities (see `types.rs`). The checker
+//! ([`Function::check`]) enforces definition-before-use, single assignment,
+//! single consumption, no live values left at a block end, and full type
+//! agreement. It is a single forward pass; expressions carry enough type
+//! annotations that nothing is inferred.
+//!
+//! # Taking values apart and putting them back
+//!
+//! Construction and deconstruction come in symmetric pairs:
+//!
+//! ```text
+//! construct                 deconstruct
+//! Product    (all fields)   SplitProduct  (all fields)
+//! PlugField  (one field +   FocusField    (one field +
+//!             its context)                 its one-hole context)
+//! SumInject  (variant)      Match         (variant, per arm)
+//! ```
+//!
+//! `FocusField`/`PlugField` are the one-hole-context (type derivative)
+//! operations: focusing consumes a product and yields the chosen field plus
+//! the *context* — an ordinary product of the remaining fields, i.e. the
+//! derivative of the product type at that field; plugging is the inverse.
+//! The value-flow analysis in `flow.rs` recognizes take-apart/put-back
+//! round trips as returning the same version of the original value.
+//!
+//! # Functions as values
+//!
+//! Function types are unary `A -> B`. A multi-input/multi-output function is
+//! referenced as a value ([`Expr::FunctionRef`]) by packing: zero
+//! inputs/outputs pack as unit, one is used directly, several pack into a
+//! product in declaration order. [`Expr::CallValue`] applies such a value.
+//! No closures exist at this level; closure syntax is surface sugar over
+//! product values plus static apply functions.
+
 use std::collections::HashMap;
 
 use crate::id::{FunctionId, GlobalId, TypeId, ValueId};
 use crate::types::{TypeError, TypeKind, TypeStore};
 
+/// A checkable core program: functions, global declarations, and literal
+/// global definitions. Function and global names share one namespace.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoreProgram {
     functions: Vec<Function>,
@@ -185,6 +235,9 @@ impl GlobalDef {
     }
 }
 
+/// A literal value tree for a global definition. Globals cannot reference
+/// other globals, so definitions are acyclic by construction; if that changes
+/// the checker must add cycle detection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlobalExpr {
     Unit,
@@ -312,6 +365,12 @@ impl GlobalExpr {
     }
 }
 
+/// A core function: typed input ids, output types, a straight-line body of
+/// single-assignment statements, and the ids it returns.
+///
+/// The frontend threading convention (borrowed/`mut` parameters returned
+/// before the visible result) is invisible here: outputs are just a list.
+/// `flow.rs` relates outputs back to inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Function {
     pub name: Option<String>,
@@ -340,6 +399,9 @@ impl Param {
     }
 }
 
+/// One single-assignment step: evaluate `expr`, bind its results (in order)
+/// to the fresh ids in `results`. An expression with no results (like `Zap`)
+/// has an empty result list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statement {
     pub results: Vec<ValueId>,
@@ -352,6 +414,11 @@ impl Statement {
     }
 }
 
+/// One arm of a [`Expr::Match`]. The arm's block starts with the variant
+/// payload bound to `payload` plus every value live before the match (arms
+/// are control-flow joins: the match consumes the entire environment, and
+/// each arm must account for all of it). All arms must return the same types,
+/// which become the match's results.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchArm {
     pub variant: usize,
@@ -376,62 +443,92 @@ impl MatchArm {
     }
 }
 
+/// A core expression. Every id an expression mentions is consumed; the
+/// comment on each variant gives its result shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
+    /// The unit value. Results: `(unit)`.
     Unit,
+    /// A constant of a finite type; `value` must be below the cardinality.
+    /// Results: `(ty)`.
     FiniteLiteral {
         ty: TypeId,
         value: u128,
     },
+    /// A static function as a value, at function type `ty`; the function's
+    /// packed inputs/outputs must match `ty` (see module doc). Results:
+    /// `(ty)`.
     FunctionRef {
         ty: TypeId,
         function: FunctionId,
     },
+    /// Construct a product from all of its fields, in order. Results: `(ty)`.
     Product {
         ty: TypeId,
         fields: Vec<ValueId>,
     },
+    /// Deconstruct a product into all of its fields. Results: one per field.
     SplitProduct {
         value: ValueId,
     },
-    ProjectProduct {
+    /// Take one field out of a product. `context_ty` is the one-hole context:
+    /// the product of the remaining fields, names and order preserved.
+    /// Results: `(field type, context_ty)`.
+    FocusField {
         value: ValueId,
         field: usize,
-        residual_ty: TypeId,
+        context_ty: TypeId,
     },
-    InsertProductField {
+    /// Put a field back into a one-hole context, rebuilding product `ty`.
+    /// Inverse of [`Expr::FocusField`]. Results: `(ty)`.
+    PlugField {
         ty: TypeId,
         field: usize,
-        field_value: ValueId,
-        residual: ValueId,
+        part: ValueId,
+        context: ValueId,
     },
+    /// Construct a sum by injecting a payload at `variant`. Results: `(ty)`.
     SumInject {
         ty: TypeId,
         variant: usize,
         payload: ValueId,
     },
+    /// Deconstruct a sum. Exactly one arm per variant; the match consumes the
+    /// scrutinee and every live value (see [`MatchArm`]). Results: whatever
+    /// the arms agree on returning.
     Match {
         scrutinee: ValueId,
         arms: Vec<MatchArm>,
     },
+    /// Reference a global. This mints a fresh linear local of the global's
+    /// type without consuming anything; the global itself is a static name,
+    /// not a runtime resource. Results: `(global's type)`.
     Global {
         global: GlobalId,
     },
+    /// Call a known function. Results: the callee's output types.
     Call {
         function: FunctionId,
         args: Vec<ValueId>,
     },
+    /// Call through a function value, with the packing convention: `arg` is
+    /// the packed input, the result is the packed output. Results: `(B)` for
+    /// a function value of type `A -> B`.
     CallValue {
         function: ValueId,
         arg: ValueId,
     },
+    /// A primitive operation; see [`BuiltinOp`] for each result shape.
     Builtin {
         op: BuiltinOp,
         args: Vec<ValueId>,
     },
+    /// Explicitly duplicate a value; requires the `Dup` capability. Both
+    /// results are the same version of the input. Results: `(T, T)`.
     Dup {
         value: ValueId,
     },
+    /// Explicitly drop a value; requires the `Zap` capability. Results: none.
     Zap {
         value: ValueId,
     },
@@ -476,7 +573,7 @@ pub enum CoreError {
     BadProductResidual {
         product: TypeId,
         field: usize,
-        residual: TypeId,
+        context: TypeId,
     },
     NotSum(TypeId),
     NotSymbol(TypeId),
@@ -502,6 +599,17 @@ pub enum CoreError {
     },
 }
 
+/// Primitive operations. The arithmetic/comparison ops are observer-style:
+/// they consume both operands and return them *unchanged* (same version)
+/// before the fresh visible result, so reading a value never forces a `dup`.
+///
+/// Result shapes:
+///
+/// ```text
+/// add/sub/mul (lhs, rhs) -> (lhs, rhs, result)     modular over cardinality
+/// eq/lt       (lhs, rhs) -> (lhs, rhs, bool)       bool_ty: any 2-unit sum
+/// next        (x)        -> (x')                   changed version, +1 mod N
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuiltinOp {
     FiniteAdd { ty: TypeId },
@@ -509,10 +617,9 @@ pub enum BuiltinOp {
     FiniteMul { ty: TypeId },
     FiniteEq { ty: TypeId, bool_ty: TypeId },
     FiniteLt { ty: TypeId, bool_ty: TypeId },
-    /// Toy update-style builtin: consumes a finite value and returns the next
-    /// value modulo the type's cardinality, as a changed version. It exists so
-    /// value-flow checking has an axiomatic "output is not the same version"
-    /// primitive to recurse to until real update builtins land.
+    /// Toy update builtin: exists so value-flow checking has an axiomatic
+    /// "output is a changed version" primitive to recurse to until real
+    /// update builtins (collections, handles) land.
     FiniteNext { ty: TypeId },
 }
 
@@ -522,12 +629,19 @@ impl From<TypeError> for CoreError {
     }
 }
 
+/// One tracked value during checking: its type, and whether it is still
+/// live (defined but not yet consumed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Slot {
     ty: TypeId,
     live: bool,
 }
 
+/// The linearity/type checker for one function. A single forward pass:
+/// `define` adds a live slot, `consume` kills it, and at every block end all
+/// slots must be dead. Match arms are checked as fresh blocks whose inputs
+/// are the payload plus everything live at the match (which the match itself
+/// consumes).
 struct FunctionChecker<'a> {
     types: &'a TypeStore,
     program: &'a CoreProgram,
@@ -645,32 +759,32 @@ impl<'a> FunctionChecker<'a> {
                     _ => Err(CoreError::NotProduct(ty)),
                 }
             }
-            Expr::ProjectProduct {
+            Expr::FocusField {
                 value,
                 field,
-                residual_ty,
+                context_ty,
             } => {
                 let product_ty = self.consume(*value)?;
                 let field_ty =
-                    check_product_residual(self.types, product_ty, *field, *residual_ty)?;
-                Ok(vec![field_ty, *residual_ty])
+                    check_product_residual(self.types, product_ty, *field, *context_ty)?;
+                Ok(vec![field_ty, *context_ty])
             }
-            Expr::InsertProductField {
+            Expr::PlugField {
                 ty,
                 field,
-                field_value,
-                residual,
+                part,
+                context,
             } => {
                 let expected_field_ty =
-                    check_product_residual(self.types, *ty, *field, self.value_type(*residual)?)?;
-                let actual_field_ty = self.consume(*field_value)?;
+                    check_product_residual(self.types, *ty, *field, self.value_type(*context)?)?;
+                let actual_field_ty = self.consume(*part)?;
                 if actual_field_ty != expected_field_ty {
                     return Err(CoreError::TypeMismatch {
                         expected: expected_field_ty,
                         actual: actual_field_ty,
                     });
                 }
-                self.consume(*residual)?;
+                self.consume(*context)?;
                 Ok(vec![*ty])
             }
             Expr::SumInject {
@@ -1001,7 +1115,7 @@ fn check_product_residual(
     types: &TypeStore,
     product: TypeId,
     field: usize,
-    residual: TypeId,
+    context: TypeId,
 ) -> Result<TypeId, CoreError> {
     let product_fields = match type_kind(types, product)? {
         TypeKind::Product(fields) => fields,
@@ -1010,16 +1124,16 @@ fn check_product_residual(
     let selected = product_fields
         .get(field)
         .ok_or(CoreError::BadField { ty: product, field })?;
-    let residual_fields = match type_kind(types, residual)? {
+    let residual_fields = match type_kind(types, context)? {
         TypeKind::Product(fields) => fields,
-        _ => return Err(CoreError::NotProduct(residual)),
+        _ => return Err(CoreError::NotProduct(context)),
     };
 
     if residual_fields.len() + 1 != product_fields.len() {
         return Err(CoreError::BadProductResidual {
             product,
             field,
-            residual,
+            context,
         });
     }
 
@@ -1033,7 +1147,7 @@ fn check_product_residual(
             return Err(CoreError::BadProductResidual {
                 product,
                 field,
-                residual,
+                context,
             });
         }
     }

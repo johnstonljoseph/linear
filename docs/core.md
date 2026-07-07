@@ -208,14 +208,36 @@ Functions carry metadata describing how outputs relate to inputs:
 - output `o` is derived from input `i`;
 - input `i` is consumed/sunk and not returned.
 
-The first slice of this is implemented in `src/flow.rs` as same-version
-inference. Every core output slot is classified as either provably the same
-version of one input, or unproven. Builtins declare their flow axiomatically:
-finite arithmetic/comparison ops return both operands unchanged, `dup` gives
-both copies the source version, `next` returns a changed version. Function
-summaries are inferred bottom-up over the call graph with a fixpoint, so
-recursion and mutual recursion converge; a path that never terminates
-constrains nothing and satisfies any contract vacuously.
+This is implemented in `src/flow.rs` as *path provenance*. Every value is
+classified as `Same(place)` — provably the same version of the value at a
+place, where a place is a parameter plus a path of field/variant steps into
+it — or `Context(whole, hole)` — a one-hole context of a place — or
+unproven. Builtins declare their flow axiomatically: finite
+arithmetic/comparison ops return both operands unchanged, `dup` gives both
+copies the source version, `next` returns a changed version.
+
+The structure rules mirror focus/plug exactly:
+
+```text
+focus:  Same(w)            ->  Same(w.f) + Context(w, f)
+plug:   Context(w, f) + Same(w.f)              -> Same(w)
+split:  Same(w)            ->  Same(w.0) ... Same(w.n-1)
+build:  Same(w.0) ... Same(w.n-1) at w's type  -> Same(w)
+match:  arm k of Same(w) binds payload Same(w.k)
+inject: Same(w.k) at variant k of w's type     -> Same(w)
+```
+
+So decompose-and-recompose round trips are recognized as identity at any
+nesting depth, and rebuilding a *different* (even structurally identical)
+nominal type is not, because the build/plug/inject rules compare against the
+type at the source place.
+
+Function summaries state each output slot's provenance in terms of the
+callee's own parameters; call sites substitute (paths compose), so a context
+can travel out of a helper, through the caller, and back into a plug.
+Summaries are computed by a fixpoint over the call graph, so recursion and
+mutual recursion converge; a path that never terminates constrains nothing
+and satisfies any contract vacuously.
 
 Frontend flow markers are checked against these summaries after body lowering:
 
@@ -228,53 +250,61 @@ Frontend flow markers are checked against these summaries after body lowering:
   reported as moved-through rather than taken; consumption itself is already
   enforced by linearity.
 
-Same-version tracking is currently whole-value: projecting a field and
-reassembling the identical parts is not yet recognized as the same version.
-That path-sensitive extension is what the planned borrow/plug (one-hole
-context) design will need, and it slots into the same lattice.
+Known remaining coarseness: focusing *into* a context (a hole inside a hole
+of the same product) degrades to unproven because field indices shift around
+the first hole, and reaching through a context passed to a callee does too.
+Both are conservative, not unsound.
 
-## Products And Projection
+## Focus And Plug (One-Hole Contexts)
 
-The first implementation supports whole-product splitting:
+Whole-product splitting consumes a product and returns all fields:
 
 ```text
 (a, b, c) = split(product)
 ```
 
-This consumes the product and returns all fields.
+Taking out a *single* field is `focus`, and its inverse is `plug`:
 
-It also supports field projection and reassembly. Projecting a field consumes
-the product and returns:
+```text
+(part, context) = focus_f(whole)
+whole2          = plug_f(context, part)
+```
 
-- the selected field value;
-- a residual product containing the remaining fields.
+The context is the one-hole context of the product at that field — in
+derivative-of-types terms, the derivative of the product type: an ordinary
+product of the remaining fields, names and order preserved. No special hole
+type exists; the compiler creates only the context product types a program
+actually uses. The checker requires the context type to exactly match the
+original product with the focused field removed. The field index is static,
+so for products the address lives in the instruction, not the value.
 
 Example:
 
 ```text
 User = { id: UserId, balance: Balance, locked: Bool }
 
-take_balance : User -> Balance * { id: UserId, locked: Bool }
-put_balance  : Balance * { id: UserId, locked: Bool } -> User
+focus_balance : User -> Balance * { id: UserId, locked: Bool }
+plug_balance  : { id: UserId, locked: Bool } * Balance -> User
 ```
 
-No hole type is needed. Residual products are ordinary product types. The
-compiler creates only the residual product types actually needed by a program.
-The checker currently requires the residual product type to exactly match the
-original product with the selected field removed, preserving remaining field
-names and order.
-
-Nested projection is repeated decomposition and reassembly:
+Nested access is repeated focusing, and plugging in reverse order — the
+ordering is forced by the types, since the outer plug needs the inner plug's
+result:
 
 ```text
-(profile, user_rest) = take_profile(user)
-(address, profile_rest) = take_address(profile)
+(profile, user_ctx)    = focus_profile(user)
+(address, profile_ctx) = focus_address(profile)
 address2 = normalize(address)
-profile2 = put_address(address2, profile_rest)
-user2 = put_profile(profile2, user_rest)
+profile2 = plug_address(profile_ctx, address2)
+user2    = plug_profile(user_ctx, profile2)
 ```
 
-Surface sugar may present this as borrowing or updating a nested field.
+Surface sugar will present this as borrowing or updating a nested field. The
+value-flow analysis (see Version Metadata) recognizes a focus/plug round trip
+that puts the same version back as returning the same version of the whole —
+that is what lets a function that reads `user.balance` verify as a *borrow*
+of `user`. When collections return, they get the same operation pair with a
+dynamic address carried inside the context value.
 
 ## Sums And Pattern Matching
 
