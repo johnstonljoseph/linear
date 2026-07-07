@@ -17,8 +17,13 @@
 //!   consumed by `PlugField`.
 //! - `Top`: unconstrained. Only survives on paths that never produce a value
 //!   (bare infinite recursion), where any claim holds vacuously.
-//! - `Other`: no proof. This is not an ignored case; it is the honest
-//!   verdict, and every contract is judged conservatively against it.
+//! - `Fresh`: a new value. Literals, arithmetic results, and anything
+//!   constructed rather than moved are fresh by axiom. Anything the analysis
+//!   cannot relate to an input is *also* fresh: computing a value too
+//!   indirectly to track is semantically indistinguishable from computing a
+//!   new one. There is deliberately no "unknown" verdict — a borrow claim
+//!   over a fresh value is a hard error and the program must be rewritten
+//!   into provable form.
 //!
 //! # The axioms
 //!
@@ -50,7 +55,7 @@
 //! `Same(w)`, the result is `Same(w ++ q)`. Summaries are computed by a
 //! fixpoint over the call graph starting from `Top`, so recursion and mutual
 //! recursion converge (each slot can only descend `Top` -> concrete ->
-//! `Other`, so the iteration terminates).
+//! `Fresh`, so the iteration terminates).
 //!
 //! # The contracts
 //!
@@ -128,8 +133,11 @@ pub enum Provenance {
     /// A one-hole context of the value at `whole`: all of it except the
     /// product field at index `hole`.
     Context { whole: Place, hole: usize },
-    /// No proven relationship.
-    Other,
+    /// A new value: introduced here (literal, builtin result,
+    /// construction), or not provably related to any input — which is
+    /// treated identically, since an untrackable computation is
+    /// indistinguishable from a fresh one. There is no "unknown".
+    Fresh,
 }
 
 impl Provenance {
@@ -142,7 +150,7 @@ impl Provenance {
         match (self, other) {
             (Self::Top, provenance) | (provenance, Self::Top) => provenance.clone(),
             (left, right) if left == right => left.clone(),
-            _ => Self::Other,
+            _ => Self::Fresh,
         }
     }
 
@@ -184,7 +192,7 @@ pub enum FlowViolation {
 /// Infer output provenances for every function in `program`.
 ///
 /// The program is expected to have passed `CoreProgram::check`; on malformed
-/// programs the analysis degrades to `Other` rather than panicking.
+/// programs the analysis degrades to `Fresh` rather than panicking.
 pub fn infer_function_flows(
     types: &TypeStore,
     program: &CoreProgram,
@@ -316,13 +324,13 @@ impl<'a> Analysis<'a> {
         for statement in body {
             let results = self.expr(&statement.expr, statement.results.len(), &env, flows);
             for (index, id) in statement.results.iter().enumerate() {
-                let provenance = results.get(index).cloned().unwrap_or(Provenance::Other);
+                let provenance = results.get(index).cloned().unwrap_or(Provenance::Fresh);
                 env.insert(*id, provenance);
             }
         }
         returns
             .iter()
-            .map(|id| env.get(id).cloned().unwrap_or(Provenance::Other))
+            .map(|id| env.get(id).cloned().unwrap_or(Provenance::Fresh))
             .collect()
     }
 
@@ -333,7 +341,7 @@ impl<'a> Analysis<'a> {
         env: &Env,
         flows: &HashMap<FunctionId, FunctionFlow>,
     ) -> Vec<Provenance> {
-        let of = |id: &ValueId| env.get(id).cloned().unwrap_or(Provenance::Other);
+        let of = |id: &ValueId| env.get(id).cloned().unwrap_or(Provenance::Fresh);
         match expr {
             // ---- identity-preserving operations ----
             Expr::Dup { value } => {
@@ -349,7 +357,7 @@ impl<'a> Analysis<'a> {
                     .map(|field| Provenance::Same(whole.extended(PathStep::Field(field))))
                     .collect(),
                 Provenance::Top => vec![Provenance::Top; result_count],
-                _ => vec![Provenance::Other; result_count],
+                _ => vec![Provenance::Fresh; result_count],
             },
             Expr::FocusField { value, field, .. } => match of(value) {
                 Provenance::Same(whole) => vec![
@@ -360,7 +368,7 @@ impl<'a> Analysis<'a> {
                     },
                 ],
                 Provenance::Top => vec![Provenance::Top, Provenance::Top],
-                _ => vec![Provenance::Other, Provenance::Other],
+                _ => vec![Provenance::Fresh, Provenance::Fresh],
             },
 
             // ---- put back together ----
@@ -387,7 +395,7 @@ impl<'a> Analysis<'a> {
                             Provenance::Same(whole.extended(PathStep::Variant(arm.variant)))
                         }
                         Provenance::Top => Provenance::Top,
-                        _ => Provenance::Other,
+                        _ => Provenance::Fresh,
                     };
                     let mut arm_env = env.clone();
                     arm_env.insert(arm.payload, payload);
@@ -399,12 +407,12 @@ impl<'a> Analysis<'a> {
                             .enumerate()
                             .map(|(index, provenance)| {
                                 provenance
-                                    .meet(returned.get(index).unwrap_or(&Provenance::Other))
+                                    .meet(returned.get(index).unwrap_or(&Provenance::Fresh))
                             })
                             .collect(),
                     });
                 }
-                joined.unwrap_or_else(|| vec![Provenance::Other; result_count])
+                joined.unwrap_or_else(|| vec![Provenance::Fresh; result_count])
             }
 
             // ---- calls: substitute the callee's summary ----
@@ -414,12 +422,12 @@ impl<'a> Analysis<'a> {
                     .iter()
                     .map(|slot| self.substitute(slot, args, env))
                     .collect(),
-                None => vec![Provenance::Other; result_count],
+                None => vec![Provenance::Fresh; result_count],
             },
 
             // ---- builtins: axiomatic flow ----
             Expr::Builtin { op, args } => {
-                let arg = |index: usize| args.get(index).map(of).unwrap_or(Provenance::Other);
+                let arg = |index: usize| args.get(index).map(of).unwrap_or(Provenance::Fresh);
                 match op {
                     // Observer ops return their operands unchanged before the
                     // fresh visible result.
@@ -427,9 +435,9 @@ impl<'a> Analysis<'a> {
                     | BuiltinOp::FiniteSub { .. }
                     | BuiltinOp::FiniteMul { .. }
                     | BuiltinOp::FiniteEq { .. }
-                    | BuiltinOp::FiniteLt { .. } => vec![arg(0), arg(1), Provenance::Other],
+                    | BuiltinOp::FiniteLt { .. } => vec![arg(0), arg(1), Provenance::Fresh],
                     // Next consumes its operand and returns a changed version.
-                    BuiltinOp::FiniteNext { .. } => vec![Provenance::Other],
+                    BuiltinOp::FiniteNext { .. } => vec![Provenance::Fresh],
                 }
             }
 
@@ -438,7 +446,7 @@ impl<'a> Analysis<'a> {
             | Expr::FiniteLiteral { .. }
             | Expr::FunctionRef { .. }
             | Expr::Global { .. }
-            | Expr::CallValue { .. } => vec![Provenance::Other; result_count],
+            | Expr::CallValue { .. } => vec![Provenance::Fresh; result_count],
         }
     }
 
@@ -447,24 +455,24 @@ impl<'a> Analysis<'a> {
     /// that place.
     fn rebuild_product(&self, ty: TypeId, fields: &[ValueId], env: &Env) -> Provenance {
         let Some(first) = fields.first() else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         let Some(Provenance::Same(first_place)) = env.get(first) else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         let Some((whole, PathStep::Field(0))) = first_place.parent() else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         for (index, field) in fields.iter().enumerate() {
             let expected = Provenance::Same(whole.extended(PathStep::Field(index)));
             if env.get(field) != Some(&expected) {
-                return Provenance::Other;
+                return Provenance::Fresh;
             }
         }
         if self.type_at(&whole) == Some(ty) {
             Provenance::Same(whole)
         } else {
-            Provenance::Other
+            Provenance::Fresh
         }
     }
 
@@ -473,18 +481,18 @@ impl<'a> Analysis<'a> {
     /// version of `whole`.
     fn plug(&self, ty: TypeId, field: usize, part: Provenance, context: Provenance) -> Provenance {
         let Provenance::Context { whole, hole } = context else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         if hole != field {
-            return Provenance::Other;
+            return Provenance::Fresh;
         }
         if part != Provenance::Same(whole.extended(PathStep::Field(field))) {
-            return Provenance::Other;
+            return Provenance::Fresh;
         }
         if self.type_at(&whole) == Some(ty) {
             Provenance::Same(whole)
         } else {
-            Provenance::Other
+            Provenance::Fresh
         }
     }
 
@@ -494,18 +502,18 @@ impl<'a> Analysis<'a> {
     /// value is that variant.)
     fn reinject(&self, ty: TypeId, variant: usize, payload: Provenance) -> Provenance {
         let Provenance::Same(place) = payload else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         let Some((whole, PathStep::Variant(step))) = place.parent() else {
-            return Provenance::Other;
+            return Provenance::Fresh;
         };
         if step != variant {
-            return Provenance::Other;
+            return Provenance::Fresh;
         }
         if self.type_at(&whole) == Some(ty) {
             Provenance::Same(whole)
         } else {
-            Provenance::Other
+            Provenance::Fresh
         }
     }
 
@@ -517,22 +525,22 @@ impl<'a> Analysis<'a> {
             args.get(place.param)
                 .and_then(|id| env.get(id))
                 .cloned()
-                .unwrap_or(Provenance::Other)
+                .unwrap_or(Provenance::Fresh)
         };
         match slot {
             Provenance::Top => Provenance::Top,
-            Provenance::Other => Provenance::Other,
+            Provenance::Fresh => Provenance::Fresh,
             Provenance::Same(callee_place) => match arg(callee_place) {
                 Provenance::Top => Provenance::Top,
                 Provenance::Same(whole) => Provenance::Same(append(whole, &callee_place.path)),
                 // Returning an argument whole (empty path) preserves whatever
                 // it was, including a context. Reaching *into* a context
                 // would require remapping field indices around the hole, so
-                // it degrades to Other.
+                // it degrades to Fresh.
                 Provenance::Context { whole, hole } if callee_place.path.is_empty() => {
                     Provenance::Context { whole, hole }
                 }
-                _ => Provenance::Other,
+                _ => Provenance::Fresh,
             },
             Provenance::Context {
                 whole: callee_place,
@@ -543,7 +551,7 @@ impl<'a> Analysis<'a> {
                     whole: append(whole, &callee_place.path),
                     hole: *hole,
                 },
-                _ => Provenance::Other,
+                _ => Provenance::Fresh,
             },
         }
     }

@@ -212,7 +212,11 @@ This is implemented in `src/flow.rs` as *path provenance*. Every value is
 classified as `Same(place)` — provably the same version of the value at a
 place, where a place is a parameter plus a path of field/variant steps into
 it — or `Context(whole, hole)` — a one-hole context of a place — or
-unproven. Builtins declare their flow axiomatically: finite
+`Fresh`, a new value. Fresh covers literals, builtin results, and
+constructions, and also anything the analysis cannot relate to an input:
+there is deliberately no "unknown" verdict, because an untrackable
+computation is semantically indistinguishable from a fresh one. Borrow
+claims over fresh values are hard errors. Builtins declare their flow axiomatically: finite
 arithmetic/comparison ops return both operands unchanged, `dup` gives both
 copies the source version, `next` returns a changed version.
 

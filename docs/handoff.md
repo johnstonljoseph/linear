@@ -281,7 +281,9 @@ update builtins (collections, handles) land.
 ## Value-Flow Checking
 
 `src/flow.rs` infers, for every core function, whether each output slot is
-provably the same version of one input. Builtins declare flow axiomatically;
+provably the same version of one input; everything else is `Fresh` — there
+is no "unknown" verdict, since an untrackable computation is semantically
+indistinguishable from a fresh one. Builtins declare flow axiomatically;
 summaries compose through calls and match joins; a fixpoint over the call
 graph handles recursion and mutual recursion (a never-terminating path
 constrains nothing and satisfies any contract vacuously). `dup` propagates the

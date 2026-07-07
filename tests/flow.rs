@@ -120,7 +120,7 @@ fn observer_builtins_thread_operands_and_produce_fresh_results() {
         vec![
             Provenance::whole_param(0),
             Provenance::whole_param(1),
-            Provenance::Other
+            Provenance::Fresh
         ]
     );
 }
@@ -164,8 +164,8 @@ fn finite_next_is_a_changed_version_and_satisfies_mut() {
     program.check(&types).unwrap();
 
     let flows = infer_function_flows(&types, &program);
-    assert_eq!(flows[&bump].outputs, vec![Provenance::Other]);
-    assert_eq!(flows[&wrapper].outputs, vec![Provenance::Other]);
+    assert_eq!(flows[&bump].outputs, vec![Provenance::Fresh]);
+    assert_eq!(flows[&wrapper].outputs, vec![Provenance::Fresh]);
 
     // `mut` is accurate for both; a borrow claim would be rejected.
     for id in [bump, wrapper] {
@@ -299,7 +299,7 @@ fn match_joins_meet_across_arms() {
         })
         .unwrap();
 
-    // One arm substitutes a fresh literal: the join degrades to Other.
+    // One arm substitutes a fresh literal: the join degrades to Fresh.
     let replaced = program
         .add_function(Function {
             name: Some("replaced".into()),
@@ -345,7 +345,7 @@ fn match_joins_meet_across_arms() {
 
     let flows = infer_function_flows(&types, &program);
     assert_eq!(flows[&threaded].outputs, vec![Provenance::whole_param(0)]);
-    assert_eq!(flows[&replaced].outputs, vec![Provenance::Other]);
+    assert_eq!(flows[&replaced].outputs, vec![Provenance::Fresh]);
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn take_params_that_escape_unchanged_are_reported() {
 
     // A take that is genuinely changed before returning is fine.
     let bumped = FunctionFlow {
-        outputs: vec![Provenance::Other],
+        outputs: vec![Provenance::Fresh],
     };
     assert!(
         check_function_contract("bump", &[("x".into(), ParamContract::Consumed)], &bumped)
@@ -458,7 +458,7 @@ fn take_params_that_escape_unchanged_are_reported() {
 
     // A take escaping into ANOTHER param's slot is also reported.
     let crossed = FunctionFlow {
-        outputs: vec![Provenance::whole_param(1), Provenance::Other],
+        outputs: vec![Provenance::whole_param(1), Provenance::Fresh],
     };
     let violations = check_function_contract(
         "f",
@@ -568,7 +568,7 @@ fn focus_observe_plug_is_a_verified_borrow_of_the_whole() {
     let flows = infer_function_flows(&types, &program);
     assert_eq!(
         flows[&low_balance].outputs,
-        vec![Provenance::whole_param(0), Provenance::Other]
+        vec![Provenance::whole_param(0), Provenance::Fresh]
     );
     // The whole function verifies as a borrow of `user`.
     assert!(
@@ -633,7 +633,7 @@ fn split_and_rebuild_is_same_version_but_swapping_fields_is_not() {
 
     let flows = infer_function_flows(&types, &program);
     assert_eq!(flows[&rebuild].outputs, vec![Provenance::whole_param(0)]);
-    assert_eq!(flows[&swapped].outputs, vec![Provenance::Other]);
+    assert_eq!(flows[&swapped].outputs, vec![Provenance::Fresh]);
 }
 
 #[test]
@@ -787,7 +787,7 @@ fn plugging_into_a_different_nominal_type_is_not_the_same_version() {
 
     let flows = infer_function_flows(&types, &program);
     // Structurally identical bytes, but not the same value: different type.
-    assert_eq!(flows[&relabel].outputs, vec![Provenance::Other]);
+    assert_eq!(flows[&relabel].outputs, vec![Provenance::Fresh]);
 }
 
 #[test]
