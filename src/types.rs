@@ -327,15 +327,10 @@ pub struct TypeDef {
 pub enum TypeKind {
     Never,
     Unit,
-    Finite {
-        values: u128,
-    },
+    Finite { values: u128 },
     Sum(Vec<Component>),
     Product(Vec<Component>),
-    Function {
-        input: TypeId,
-        output: TypeId,
-    },
+    Function { input: TypeId, output: TypeId },
     Symbol,
     Text,
     Primitive,

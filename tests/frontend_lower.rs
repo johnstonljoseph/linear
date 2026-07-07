@@ -698,6 +698,34 @@ fn lowers_product_constructor_bodies() {
 }
 
 #[test]
+fn lowers_record_shorthand_after_mutating_statement_call() {
+    let module = frontend::parse_module(
+        r#"
+        fn add_event(mut events: U32, take event: U32) -> () {
+          ()
+        }
+
+        fn run(take events: U32, take users: U32) -> { users: U32, events: U32 } {
+          add_event(mut events, take 7)
+          { users, events }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let lowered = frontend::lower_module_bodies(&module).unwrap();
+    let run = lowered.program.function_id("run").unwrap();
+    let result = Evaluator::new(&lowered.types, &lowered.program)
+        .run_function(run, vec![Value::Finite(9), Value::Finite(3)])
+        .unwrap();
+
+    assert_eq!(
+        result,
+        vec![Value::Product(vec![Value::Finite(3), Value::Finite(9)])]
+    );
+}
+
+#[test]
 fn lowers_enum_constructors() {
     let module = frontend::parse_module(
         r#"

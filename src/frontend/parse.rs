@@ -600,7 +600,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             .boxed();
         let block = block_raw.clone().map(Expr::Block);
 
-        let record_field =
+        let explicit_record_field =
             ident
                 .clone()
                 .then_ignore(sym(':'))
@@ -610,11 +610,22 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
                     value,
                 });
 
-        let record_expr = record_field
+        let record_field = ident
+            .clone()
+            .then(sym(':').ignore_then(expr.clone()).or_not())
+            .map(|(name, value)| Field {
+                name: Some(name.clone()),
+                value: value.unwrap_or(Expr::Name(name)),
+            });
+
+        let record_fields = record_field
             .clone()
             .separated_by(list_separator())
             .allow_trailing()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+
+        let record_expr = record_fields
+            .clone()
             .delimited_by(sym('{'), close_sym('}'))
             .map(Expr::Product)
             .boxed();
@@ -701,8 +712,8 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
             string,
             if_expr,
             match_expr,
-            record_expr.clone(),
             block,
+            record_expr.clone(),
             ident.map(Expr::Name),
             paren_expr,
         ))
@@ -724,11 +735,11 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
         }
 
         let call = args.clone().map(Postfix::Call).boxed();
-        let record_construct = record_expr
-            .map(|expr| match expr {
-                Expr::Product(fields) => fields,
-                _ => unreachable!("record expression parser produces products"),
-            })
+        let record_construct = explicit_record_field
+            .separated_by(list_separator())
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(inline_sym('{'), close_sym('}'))
             .map(Postfix::Record)
             .boxed();
         let method = inline_sym('.')
@@ -792,7 +803,7 @@ fn expr_parser<'src>() -> impl Parser<'src, &'src str, Expr, extra::Err<Rich<'sr
                 if callee.receiver_flow != ValueFlow::ReturnedUnchanged {
                     Err(Rich::custom(
                         span,
-                        "`mut` and `take` receiver markers must be used before a method call",
+                        "`mut` and `take` value-flow markers must be used before a method call",
                     ))
                 } else {
                     Ok(callee.expr)

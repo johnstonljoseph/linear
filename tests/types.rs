@@ -1,6 +1,5 @@
 use linear::{
-    Capabilities, Component, DeclaredCapabilities, TypeError, TypeId,
-    TypeKind, TypeStore,
+    Capabilities, Component, DeclaredCapabilities, TypeError, TypeId, TypeKind, TypeStore,
 };
 
 #[test]

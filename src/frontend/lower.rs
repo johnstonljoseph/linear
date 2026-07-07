@@ -5,16 +5,18 @@ use crate::core::{
     BuiltinOp, CoreError, CoreProgram, Expr as CoreExpr, Function, GlobalDecl,
     MatchArm as CoreMatchArm, Param as CoreParam, Statement,
 };
+use crate::flow::{
+    FlowViolation, FunctionFlow, ParamContract, check_function_contract, infer_function_flows,
+};
 use crate::frontend::{
     Arg, BinaryOp, Block, Expr, Field, FunctionDef, GlobalDef as FrontendGlobalDef, Item, LetStmt,
     MatchArm as FrontendMatchArm, Module, Param as FrontendParam, Pattern, Stmt, TypeDef, TypeExpr,
     ValueFlow,
 };
 use crate::id::{FunctionId, GlobalId, ValueId};
-use crate::flow::{
-    FlowViolation, FunctionFlow, ParamContract, check_function_contract, infer_function_flows,
+use crate::types::{
+    Component, ComponentName, DeclaredCapabilities, TypeError, TypeKind, TypeStore,
 };
-use crate::types::{Component, ComponentName, DeclaredCapabilities, TypeError, TypeKind, TypeStore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoweredTypes {
@@ -1051,9 +1053,7 @@ impl<'a> BodyLowerer<'a> {
             }
             Expr::Call { callee, args } => self.lower_call(callee, args, expected),
             Expr::Binary { lhs, op, rhs } => self.lower_binary(lhs, *op, rhs),
-            Expr::Product(_) => Err(LowerError::UnsupportedExpression(
-                "product literals need constructor context",
-            )),
+            Expr::Product(fields) => self.lower_product_literal(fields, expected),
             Expr::FieldAccess { receiver, field } => {
                 self.lower_field_access(receiver, field, expected)
             }
@@ -1427,6 +1427,38 @@ impl<'a> BodyLowerer<'a> {
             );
         }
         Ok(values)
+    }
+
+    fn lower_product_literal(
+        &mut self,
+        fields: &[Field<Expr>],
+        expected: Option<TypeId>,
+    ) -> Result<LoweredValue, LowerError> {
+        let ty = expected.ok_or(LowerError::UnsupportedExpression(
+            "product literals need expected product type",
+        ))?;
+        let TypeKind::Product(expected_fields) = self
+            .types
+            .get(ty)
+            .ok_or(LowerError::Type(TypeError::UnknownType(ty)))?
+            .kind
+            .clone()
+        else {
+            return Err(LowerError::UnsupportedExpression(
+                "product literal expected type must be a product",
+            ));
+        };
+
+        let field_values = self.lower_product_fields("product", &expected_fields, fields)?;
+        let id = self.fresh_value();
+        self.push_statement(
+            vec![id],
+            CoreExpr::Product {
+                ty,
+                fields: field_values,
+            },
+        )?;
+        Ok(LoweredValue { id, ty })
     }
 
     fn lower_unit_enum_constructor(

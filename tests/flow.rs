@@ -183,7 +183,9 @@ fn finite_next_is_a_changed_version_and_satisfies_mut() {
     // Evaluator semantics: next is +1 modulo the cardinality.
     let evaluator = Evaluator::new(&types, &program);
     assert_eq!(
-        evaluator.run_function(bump, vec![Value::Finite(41)]).unwrap(),
+        evaluator
+            .run_function(bump, vec![Value::Finite(41)])
+            .unwrap(),
         vec![Value::Finite(42)]
     );
     assert_eq!(
@@ -701,7 +703,11 @@ fn match_and_reinject_is_same_version_and_flags_a_mislabeled_take() {
     assert_eq!(flows[&echo].outputs, vec![Provenance::whole_param(0)]);
     // So declaring the parameter `take` is a mislabeled move-through.
     assert_eq!(
-        check_function_contract("echo", &[("m".into(), ParamContract::Consumed)], &flows[&echo]),
+        check_function_contract(
+            "echo",
+            &[("m".into(), ParamContract::Consumed)],
+            &flows[&echo]
+        ),
         vec![FlowViolation::TakeIsBorrow {
             function: "echo".into(),
             param: "m".into(),

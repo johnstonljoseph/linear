@@ -451,26 +451,15 @@ pub enum Expr {
     Unit,
     /// A constant of a finite type; `value` must be below the cardinality.
     /// Results: `(ty)`.
-    FiniteLiteral {
-        ty: TypeId,
-        value: u128,
-    },
+    FiniteLiteral { ty: TypeId, value: u128 },
     /// A static function as a value, at function type `ty`; the function's
     /// packed inputs/outputs must match `ty` (see module doc). Results:
     /// `(ty)`.
-    FunctionRef {
-        ty: TypeId,
-        function: FunctionId,
-    },
+    FunctionRef { ty: TypeId, function: FunctionId },
     /// Construct a product from all of its fields, in order. Results: `(ty)`.
-    Product {
-        ty: TypeId,
-        fields: Vec<ValueId>,
-    },
+    Product { ty: TypeId, fields: Vec<ValueId> },
     /// Deconstruct a product into all of its fields. Results: one per field.
-    SplitProduct {
-        value: ValueId,
-    },
+    SplitProduct { value: ValueId },
     /// Take one field out of a product. `context_ty` is the one-hole context:
     /// the product of the remaining fields, names and order preserved.
     /// Results: `(field type, context_ty)`.
@@ -503,9 +492,7 @@ pub enum Expr {
     /// Reference a global. This mints a fresh linear local of the global's
     /// type without consuming anything; the global itself is a static name,
     /// not a runtime resource. Results: `(global's type)`.
-    Global {
-        global: GlobalId,
-    },
+    Global { global: GlobalId },
     /// Call a known function. Results: the callee's output types.
     Call {
         function: FunctionId,
@@ -514,24 +501,14 @@ pub enum Expr {
     /// Call through a function value, with the packing convention: `arg` is
     /// the packed input, the result is the packed output. Results: `(B)` for
     /// a function value of type `A -> B`.
-    CallValue {
-        function: ValueId,
-        arg: ValueId,
-    },
+    CallValue { function: ValueId, arg: ValueId },
     /// A primitive operation; see [`BuiltinOp`] for each result shape.
-    Builtin {
-        op: BuiltinOp,
-        args: Vec<ValueId>,
-    },
+    Builtin { op: BuiltinOp, args: Vec<ValueId> },
     /// Explicitly duplicate a value; requires the `Dup` capability. Both
     /// results are the same version of the input. Results: `(T, T)`.
-    Dup {
-        value: ValueId,
-    },
+    Dup { value: ValueId },
     /// Explicitly drop a value; requires the `Zap` capability. Results: none.
-    Zap {
-        value: ValueId,
-    },
+    Zap { value: ValueId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -612,15 +589,29 @@ pub enum CoreError {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuiltinOp {
-    FiniteAdd { ty: TypeId },
-    FiniteSub { ty: TypeId },
-    FiniteMul { ty: TypeId },
-    FiniteEq { ty: TypeId, bool_ty: TypeId },
-    FiniteLt { ty: TypeId, bool_ty: TypeId },
+    FiniteAdd {
+        ty: TypeId,
+    },
+    FiniteSub {
+        ty: TypeId,
+    },
+    FiniteMul {
+        ty: TypeId,
+    },
+    FiniteEq {
+        ty: TypeId,
+        bool_ty: TypeId,
+    },
+    FiniteLt {
+        ty: TypeId,
+        bool_ty: TypeId,
+    },
     /// Toy update builtin: exists so value-flow checking has an axiomatic
     /// "output is a changed version" primitive to recurse to until real
     /// update builtins (collections, handles) land.
-    FiniteNext { ty: TypeId },
+    FiniteNext {
+        ty: TypeId,
+    },
 }
 
 impl From<TypeError> for CoreError {
@@ -765,8 +756,7 @@ impl<'a> FunctionChecker<'a> {
                 context_ty,
             } => {
                 let product_ty = self.consume(*value)?;
-                let field_ty =
-                    check_product_residual(self.types, product_ty, *field, *context_ty)?;
+                let field_ty = check_product_residual(self.types, product_ty, *field, *context_ty)?;
                 Ok(vec![field_ty, *context_ty])
             }
             Expr::PlugField {

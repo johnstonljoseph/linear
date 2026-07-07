@@ -501,4 +501,3 @@ fn expect_finite(value: Value) -> Result<u128, EvalError> {
         }),
     }
 }
-

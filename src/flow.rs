@@ -406,8 +406,7 @@ impl<'a> Analysis<'a> {
                             .iter()
                             .enumerate()
                             .map(|(index, provenance)| {
-                                provenance
-                                    .meet(returned.get(index).unwrap_or(&Provenance::Fresh))
+                                provenance.meet(returned.get(index).unwrap_or(&Provenance::Fresh))
                             })
                             .collect(),
                     });

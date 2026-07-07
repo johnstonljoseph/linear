@@ -217,6 +217,35 @@ fn parses_optional_arg_labels_and_method_calls() {
 }
 
 #[test]
+fn parses_record_expression_field_shorthand() {
+    let module = parse_module(
+        r#"
+        fn state(users: U32, events: U32) -> { users: U32, events: U32 } {
+          { users, events }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let Item::Function(function) = &module.items[0] else {
+        panic!("expected function item");
+    };
+    assert_eq!(
+        function.body.result.as_deref(),
+        Some(&Expr::Product(vec![
+            Field {
+                name: Some("users".into()),
+                value: Expr::Name("users".into()),
+            },
+            Field {
+                name: Some("events".into()),
+                value: Expr::Name("events".into()),
+            },
+        ]))
+    );
+}
+
+#[test]
 fn parses_value_flow_markers_on_method_receivers() {
     let module = parse_module(
         r#"
